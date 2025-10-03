@@ -12,7 +12,7 @@ def analyze_csv(self, csv_path, dynamic_thresholds=None):
         # Create unique identifier INCLUDING STATION AND SAVE
         grouping['unique_id'] = (f"{grouping.get('unit_id', 'NA')}_"
                                 f"{grouping.get('save', 'NA')}_"
-                                f"{grouping.get('station', 'NA')}_"  # INCLUDE STATION
+                                f"{grouping.get('station', 'NA')}_"
                                 f"{grouping.get('test_case', 'NA')}_"
                                 f"{grouping.get('test_run', 'NA')}_"
                                 f"{grouping.get('ofp', 'NA')}_"
@@ -66,8 +66,8 @@ def analyze_csv(self, csv_path, dynamic_thresholds=None):
         if len(steady_data) > 1:
             try:
                 result = linregress(range(len(voltage_values)), voltage_values)
-                metrics['slope'] = result.slope
-                metrics['abs_slope'] = abs(result.slope)
+                metrics['slope'] = result.slope  # Keep actual slope (can be negative)
+                metrics['abs_slope'] = abs(result.slope)  # Still store for reference
                 metrics['r_squared'] = result.rvalue ** 2
             except:
                 metrics['slope'] = 0
@@ -90,6 +90,9 @@ def analyze_csv(self, csv_path, dynamic_thresholds=None):
         flags = []
         reasons = []
         
+        # Define minimum meaningful threshold (below this, don't flag as "too low")
+        MIN_MEANINGFUL_VALUE = 0.001  # Adjust as needed
+        
         # Use dynamic thresholds if provided
         if dynamic_thresholds:
             # Use dynamic thresholds for this OFP/test_case group
@@ -100,41 +103,45 @@ def analyze_csv(self, csv_path, dynamic_thresholds=None):
                 # Check all 4 thresholds
                 failed_checks = 0
                 
-                # Check variance
-                if ('min_variance' in thresh and metrics['variance'] < thresh['min_variance']) or \
-                   ('max_variance' in thresh and metrics['variance'] > thresh['max_variance']):
-                    failed_checks += 1
-                    if 'min_variance' in thresh and metrics['variance'] < thresh['min_variance']:
-                        reasons.append(f"Variance {metrics['variance']:.3f} < {thresh['min_variance']:.3f} (dynamic)")
-                    else:
-                        reasons.append(f"Variance {metrics['variance']:.3f} > {thresh['max_variance']:.3f} (dynamic)")
+                # Check variance - don't flag if both value and threshold are near zero
+                if 'min_variance' in thresh and 'max_variance' in thresh:
+                    if thresh['max_variance'] > MIN_MEANINGFUL_VALUE:  # Only check if threshold is meaningful
+                        if metrics['variance'] < thresh['min_variance']:
+                            failed_checks += 1
+                            reasons.append(f"Variance {metrics['variance']:.3f} < {thresh['min_variance']:.3f} (dynamic)")
+                        elif metrics['variance'] > thresh['max_variance']:
+                            failed_checks += 1
+                            reasons.append(f"Variance {metrics['variance']:.3f} > {thresh['max_variance']:.3f} (dynamic)")
                 
-                # Check std
-                if ('min_std' in thresh and metrics['std'] < thresh['min_std']) or \
-                   ('max_std' in thresh and metrics['std'] > thresh['max_std']):
-                    failed_checks += 1
-                    if 'min_std' in thresh and metrics['std'] < thresh['min_std']:
-                        reasons.append(f"Std {metrics['std']:.3f} < {thresh['min_std']:.3f} (dynamic)")
-                    else:
-                        reasons.append(f"Std {metrics['std']:.3f} > {thresh['max_std']:.3f} (dynamic)")
+                # Check std - don't flag if both value and threshold are near zero
+                if 'min_std' in thresh and 'max_std' in thresh:
+                    if thresh['max_std'] > MIN_MEANINGFUL_VALUE:  # Only check if threshold is meaningful
+                        if metrics['std'] < thresh['min_std']:
+                            failed_checks += 1
+                            reasons.append(f"Std {metrics['std']:.3f} < {thresh['min_std']:.3f} (dynamic)")
+                        elif metrics['std'] > thresh['max_std']:
+                            failed_checks += 1
+                            reasons.append(f"Std {metrics['std']:.3f} > {thresh['max_std']:.3f} (dynamic)")
                 
-                # Check abs_slope
-                if ('min_abs_slope' in thresh and metrics['abs_slope'] < thresh['min_abs_slope']) or \
-                   ('max_abs_slope' in thresh and metrics['abs_slope'] > thresh['max_abs_slope']):
-                    failed_checks += 1
-                    if 'min_abs_slope' in thresh and metrics['abs_slope'] < thresh['min_abs_slope']:
-                        reasons.append(f"Slope {metrics['abs_slope']:.4f} < {thresh['min_abs_slope']:.4f} (dynamic)")
-                    else:
-                        reasons.append(f"Slope {metrics['abs_slope']:.4f} > {thresh['max_abs_slope']:.4f} (dynamic)")
+                # Check ACTUAL SLOPE (not absolute) - should work with negative slopes
+                if 'min_slope' in thresh and 'max_slope' in thresh:
+                    # For slope, use the actual value (can be negative)
+                    if metrics['slope'] < thresh['min_slope'] or metrics['slope'] > thresh['max_slope']:
+                        failed_checks += 1
+                        if metrics['slope'] < thresh['min_slope']:
+                            reasons.append(f"Slope {metrics['slope']:.4f} < {thresh['min_slope']:.4f} (dynamic)")
+                        else:
+                            reasons.append(f"Slope {metrics['slope']:.4f} > {thresh['max_slope']:.4f} (dynamic)")
                 
-                # Check IQR
-                if ('min_iqr' in thresh and metrics['iqr'] < thresh['min_iqr']) or \
-                   ('max_iqr' in thresh and metrics['iqr'] > thresh['max_iqr']):
-                    failed_checks += 1
-                    if 'min_iqr' in thresh and metrics['iqr'] < thresh['min_iqr']:
-                        reasons.append(f"IQR {metrics['iqr']:.3f} < {thresh['min_iqr']:.3f} (dynamic)")
-                    else:
-                        reasons.append(f"IQR {metrics['iqr']:.3f} > {thresh['max_iqr']:.3f} (dynamic)")
+                # Check IQR - don't flag if both value and threshold are near zero
+                if 'min_iqr' in thresh and 'max_iqr' in thresh:
+                    if thresh['max_iqr'] > MIN_MEANINGFUL_VALUE:  # Only check if threshold is meaningful
+                        if metrics['iqr'] < thresh['min_iqr']:
+                            failed_checks += 1
+                            reasons.append(f"IQR {metrics['iqr']:.3f} < {thresh['min_iqr']:.3f} (dynamic)")
+                        elif metrics['iqr'] > thresh['max_iqr']:
+                            failed_checks += 1
+                            reasons.append(f"IQR {metrics['iqr']:.3f} > {thresh['max_iqr']:.3f} (dynamic)")
                 
                 # Only flag if ALL 4 fail
                 if failed_checks == 4:
@@ -153,6 +160,7 @@ def analyze_csv(self, csv_path, dynamic_thresholds=None):
                 failed_checks += 1
                 reasons.append(f"Std {metrics['std']:.3f} > {self.steady_state_thresholds['max_std']}")
             
+            # For fixed thresholds, check absolute slope (backward compatibility)
             if metrics['abs_slope'] > self.steady_state_thresholds['max_slope']:
                 failed_checks += 1
                 reasons.append(f"Slope {metrics['abs_slope']:.4f} > {self.steady_state_thresholds['max_slope']}")
@@ -181,118 +189,51 @@ def analyze_csv(self, csv_path, dynamic_thresholds=None):
         return None
 
 
-def create_simple_plot(self, df, grouping, output_path):
-    """Create a detailed plot showing WHY something was flagged."""
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), height_ratios=[3, 1])
+# Also update the threshold calculation in run_analysis to use actual slope, not abs_slope:
+def calculate_dynamic_thresholds_section():
+    """
+    This is the section in run_analysis that calculates dynamic thresholds.
+    Update it to use 'slope' instead of 'abs_slope'
+    """
+    # CALCULATE DYNAMIC THRESHOLDS (± 50% of standard deviation)
+    print("\nCalculating dynamic thresholds from OFP/test_case groups...")
+    metrics_df = pd.DataFrame(all_metrics)
     
-    colors = {
-        'de-energized': 'gray',
-        'stabilizing': 'orange',
-        'steady_state': 'green',
-        'unidentified': 'purple'
-    }
+    # Only use steady state for baseline
+    steady_df = metrics_df[metrics_df['label'] == 'steady_state']
     
-    # Main voltage plot - SCATTER ONLY (no lines)
-    for label in df['label'].unique():
-        label_data = df[df['label'] == label]
-        ax1.scatter(label_data['timestamp'], label_data['voltage'],
-                   color=colors.get(label, 'black'),
-                   label=label, s=15, alpha=0.7, edgecolors='none')
-    
-    # Add reference lines
-    ax1.axhline(y=self.operational_min, color='red', linestyle='--', alpha=0.5, 
-               label='18V threshold', linewidth=2)
-    ax1.axhline(y=self.deenergized_max, color='gray', linestyle='--', alpha=0.3)
-    
-    # Get flagging info for steady state only - WITH ALL FIELDS INCLUDING STATION
-    flagged_info = []
-    found_flagged = False
-    
-    if 'steady_state' in df['label'].values:
-        # Match INCLUDING STATION
-        matching_results = [r for r in self.results 
-                          if (r.get('label') == 'steady_state' and 
-                              r.get('unit_id') == grouping.get('unit_id') and
-                              r.get('save') == grouping.get('save') and
-                              r.get('station') == grouping.get('station') and  # MATCH STATION
-                              r.get('test_run') == grouping.get('test_run') and
-                              r.get('dc_folder') == grouping.get('dc_folder') and
-                              r.get('test_case') == grouping.get('test_case') and
-                              r.get('ofp') == grouping.get('ofp'))]
-        
-        # Should only be ONE result for steady_state per file
-        if matching_results:
-            result = matching_results[0]  # There should only be one steady_state result
-            if result.get('flagged'):
-                found_flagged = True
-                flagged_info.append(f"FLAGGED: {result.get('flag_reasons', 'Unknown reason')}")
+    dynamic_thresholds = {}
+    if not steady_df.empty:
+        for (ofp, test_case), group in steady_df.groupby(['ofp', 'test_case']):
+            if len(group) >= 3:  # Need at least 3 samples
+                thresholds = {}
                 
-                # Add statistics for flagged steady state
-                stats_text = (f"Flagged Stats: Mean={result.get('mean_voltage', 0):.2f}V | "
-                            f"Std={result.get('std', 0):.3f} | "
-                            f"Var={result.get('variance', 0):.3f} | "
-                            f"Slope={result.get('abs_slope', 0):.4f} | "
-                            f"IQR={result.get('iqr', 0):.3f}")
-                flagged_info.append(stats_text)
-            else:
-                # Not flagged, just show stats
-                stats_text = (f"Stats: Mean={result.get('mean_voltage', 0):.2f}V | "
-                            f"Std={result.get('std', 0):.3f} | "
-                            f"Var={result.get('variance', 0):.3f} | "
-                            f"Slope={result.get('abs_slope', 0):.4f}")
-                flagged_info.append(stats_text)
-    
-    # Title with all info INCLUDING STATION
-    title = (f"Unit: {grouping.get('unit_id', 'NA')} | "
-            f"Save: {grouping.get('save', 'NA')} | "
-            f"Station: {grouping.get('station', 'NA')} | "  # INCLUDE STATION
-            f"Test Case: {grouping.get('test_case', 'NA')} | "
-            f"Run: {grouping.get('test_run', 'NA')} | "
-            f"DC: {grouping.get('dc_folder', 'NA')}")
-    
-    if flagged_info:
-        title += f"\n{chr(10).join(flagged_info)}"
-    
-    ax1.set_title(title, fontsize=11, color='red' if found_flagged else 'black')
-    ax1.set_xlabel('Timestamp', fontsize=10)
-    ax1.set_ylabel('Voltage (V)', fontsize=10)
-    ax1.legend(loc='best', fontsize=8)
-    ax1.grid(True, alpha=0.3)
-    
-    # Segment visualization at bottom
-    segment_colors = plt.cm.tab10(np.linspace(0, 1, len(df['segment'].unique())))
-    for i, seg in enumerate(df['segment'].unique()):
-        seg_data = df[df['segment'] == seg]
-        ax2.scatter(seg_data['timestamp'], [seg]*len(seg_data), 
-                   color=segment_colors[i], s=10, alpha=0.7, label=f'Seg {seg}')
-    
-    ax2.set_xlabel('Timestamp', fontsize=10)
-    ax2.set_ylabel('Segment ID', fontsize=10)
-    ax2.set_title('Original Segment Clustering', fontsize=10)
-    ax2.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=100)
-    plt.close()
-
-
-# In run_analysis, update plot naming to include station:
-# Generate plots only for flagged files
-if flagged_files:
-    print(f"\nGenerating plots for {len(flagged_files)} files with flagged steady-state segments...")
-    
-    for df, grouping, csv_path in tqdm(flagged_files, desc="Creating plots"):
-        try:
-            # Include STATION in the filename to prevent duplicates
-            plot_name = (f"{grouping.get('unit_id', 'NA')}_"
-                        f"save{grouping.get('save', 'NA')}_"
-                        f"station{grouping.get('station', 'NA')}_"  # INCLUDE STATION
-                        f"{grouping.get('test_case', 'NA')}_"
-                        f"run{grouping.get('test_run', 'NA')}_"
-                        f"{grouping.get('dc_folder', 'NA')}.png")
-            
-            plot_path = plots_folder / plot_name
-            self.create_simple_plot(df, grouping, plot_path)
-            
-        except Exception as e:
-            print(f"Error creating plot for {csv_path.name}: {e}")
+                # Calculate thresholds for each metric (both upper and lower bounds)
+                # Change from 'abs_slope' to 'slope' for proper negative/positive handling
+                for metric in ['variance', 'std', 'slope', 'iqr']:  # Changed from 'abs_slope' to 'slope'
+                    if metric in group.columns:
+                        mean_val = group[metric].mean()
+                        std_val = group[metric].std()
+                        
+                        # Upper threshold = mean + (50% of std)
+                        # Lower threshold = mean - (50% of std)
+                        upper_threshold = mean_val + (0.5 * std_val)
+                        lower_threshold = mean_val - (0.5 * std_val)
+                        
+                        # For variance, std, and iqr, ensure non-negative
+                        if metric in ['variance', 'std', 'iqr']:
+                            lower_threshold = max(0, lower_threshold)
+                        # For slope, allow negative values
+                        
+                        # Store both thresholds
+                        thresholds[f'max_{metric}'] = upper_threshold
+                        thresholds[f'min_{metric}'] = lower_threshold
+                
+                dynamic_thresholds[f"{ofp}_{test_case}"] = thresholds
+                print(f"  {ofp}/{test_case}:")
+                print(f"    Variance: [{thresholds.get('min_variance', 0):.3f}, {thresholds.get('max_variance', 0):.3f}]")
+                print(f"    Std: [{thresholds.get('min_std', 0):.3f}, {thresholds.get('max_std', 0):.3f}]")
+                print(f"    Slope: [{thresholds.get('min_slope', 0):.4f}, {thresholds.get('max_slope', 0):.4f}]")  # Changed from abs_slope
+                print(f"    IQR: [{thresholds.get('min_iqr', 0):.3f}, {thresholds.get('max_iqr', 0):.3f}]")
+    else:
+        print("  No steady state segments found for threshold calculation")
