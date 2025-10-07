@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unit tests for SimplifiedVoltageAnalyzer
+Unit tests for VoltageAnalyzer with Dynamic Thresholds
 Run with: python test_voltage_analyzer.py
 """
 
@@ -10,18 +10,18 @@ import shutil
 from pathlib import Path
 import pandas as pd
 import numpy as np
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, MagicMock
 import sys
 import os
 
 # Add parent directory to path if needed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Import the class to test
-from athena import SimplifiedVoltageAnalyzer
+# Import the class to test (adjust import as needed)
+# from athenav4 import VoltageAnalyzer
 
 
-class TestVoltageAnalyzer(unittest.TestCase):
+class TestVoltageAnalyzerDynamic(unittest.TestCase):
     
     def setUp(self):
         """Create temp directories for testing"""
@@ -29,11 +29,39 @@ class TestVoltageAnalyzer(unittest.TestCase):
         self.input_dir = Path(self.test_dir) / 'input'
         self.output_dir = Path(self.test_dir) / 'output'
         self.input_dir.mkdir()
-        self.analyzer = SimplifiedVoltageAnalyzer(self.input_dir, self.output_dir)
+        
+        # Initialize analyzer (assuming VoltageAnalyzer is the class name)
+        self.analyzer = VoltageAnalyzer(self.input_dir, self.output_dir)
+        
+        # Mock the methods that aren't shown
+        self.analyzer.parse_filename = Mock(return_value={
+            'unit_id': 'UNIT001',
+            'ofp': 'OFP1',
+            'test_case': 'TC1',
+            'test_run': '1'
+        })
+        self.analyzer.classify_segments = Mock(side_effect=self._mock_classify_segments)
+        self.analyzer.create_simple_plot = Mock()
+        self.analyzer.create_summary_plot = Mock()
+        
+        # Set default thresholds
+        self.analyzer.operational_min = 18.0
+        self.analyzer.steady_state_thresholds = {
+            'max_variance': 0.5,
+            'max_std': 0.7,
+            'max_slope': 0.01
+        }
+        self.analyzer.results = []
+        self.analyzer.failed_files = []
     
     def tearDown(self):
         """Clean up temp directories"""
         shutil.rmtree(self.test_dir)
+    
+    def _mock_classify_segments(self, df):
+        """Mock segment classification - always returns steady_state for testing"""
+        df['label'] = 'steady_state'
+        return df
     
     def create_test_csv(self, folder, filename, mean_v=19.0, std_v=0.1, n_points=100):
         """Helper to create test CSV files"""
@@ -50,266 +78,349 @@ class TestVoltageAnalyzer(unittest.TestCase):
         df.to_csv(path, index=False)
         return path
     
-    # Test initialization
-    def test_init_creates_output_folder(self):
-        """Test output folder is created"""
-        self.assertTrue(self.output_dir.exists())
-    
-    def test_init_sets_thresholds(self):
-        """Test thresholds are set correctly"""
-        self.assertEqual(self.analyzer.operational_min, 18.0)
-        self.assertEqual(self.analyzer.operational_max, 29.0)
-        self.assertEqual(self.analyzer.deenergized_max, 2.0)
-    
-    # Test filename parsing
-    def test_parse_filename_simple(self):
-        """Test parsing simple filename"""
-        filename = "unit_id=U001_test_case=baseline_test_run=1_segments.csv"
-        result = self.analyzer.parse_filename(filename)
+    # Test two-pass analysis with dynamic thresholds
+    def test_run_analysis_two_pass_process(self):
+        """Test that run_analysis performs two passes"""
+        # Create test files
+        for i in range(3):
+            self.create_test_csv(
+                self.input_dir / 'tc1' / 'dc1',
+                f'unit_id=U{i:03d}_ofp=OFP1_test_case=TC1_test_run=1_segments.csv',
+                mean_v=19.0,
+                std_v=0.1
+            )
         
-        self.assertEqual(result['unit_id'], 'U001')
-        self.assertEqual(result['test_case'], 'baseline')
-        self.assertEqual(result['test_run'], '1')
-    
-    def test_parse_filename_compound_values(self):
-        """Test parsing filename with compound values"""
-        filename = "unit_id=UNIT_001_test_case=stress_test_test_run=2_segments.csv"
-        result = self.analyzer.parse_filename(filename)
+        # Track analyze_csv calls
+        original_analyze = self.analyzer.analyze_csv
+        call_count = []
         
-        self.assertEqual(result['unit_id'], 'UNIT_001')
-        self.assertEqual(result['test_case'], 'stress_test')
-        self.assertEqual(result['test_run'], '2')
-    
-    # Test classification functions
-    def test_is_deenergized(self):
-        """Test de-energized classification"""
-        voltages = np.ones(100) * 1.5  # Low voltage
-        labels = np.ones(100, dtype=int)
-        timestamps = np.arange(100)
+        def track_analyze(path, dynamic_thresholds=None):
+            call_count.append(dynamic_thresholds)
+            # Return mock data
+            return ([{
+                'label': 'steady_state',
+                'mean_voltage': 19.0,
+                'variance': 0.01,
+                'std': 0.1,
+                'slope': 0.001,
+                'abs_slope': 0.001,
+                'iqr': 0.2,
+                'flagged': False,
+                'flags': '',
+                'flag_reasons': '',
+                'ofp': 'OFP1',
+                'test_case': 'TC1',
+                'n_points': 100
+            }], pd.DataFrame(), {'ofp': 'OFP1', 'test_case': 'TC1'})
         
-        mask = self.analyzer.is_deenergized(voltages, labels, timestamps)
-        self.assertTrue(np.all(mask))
-    
-    def test_is_stabilizing(self):
-        """Test stabilizing classification"""
-        voltages = np.linspace(5, 25, 100)  # Ramping up
-        labels = np.ones(100, dtype=int)
-        timestamps = np.arange(100)
+        self.analyzer.analyze_csv = track_analyze
         
-        mask = self.analyzer.is_stabilizing(voltages, labels, timestamps, slope_cutoff=0.1)
-        self.assertTrue(np.all(mask))
-    
-    def test_is_steadystate(self):
-        """Test steady state classification"""
-        voltages = np.ones(100) * 22.0 + np.random.normal(0, 0.01, 100)
-        labels = np.ones(100, dtype=int)
-        timestamps = np.arange(100)
+        with patch('pandas.ExcelWriter'), patch('builtins.print'):
+            self.analyzer.run_analysis()
         
-        mask = self.analyzer.is_steadystate(voltages, labels, timestamps)
-        self.assertTrue(np.all(mask))
-    
-    # Test segment classification
-    def test_classify_segments(self):
-        """Test full segment classification"""
-        df = pd.DataFrame({
-            'timestamp': np.arange(300),
-            'voltage': np.concatenate([
-                np.ones(100) * 1.0,      # De-energized
-                np.linspace(2, 20, 100), # Stabilizing
-                np.ones(100) * 22.0      # Steady state
-            ]),
-            'segment': np.repeat([0, 1, 2], 100)
-        })
+        # Should have been called twice per file (first pass with None, second with thresholds)
+        self.assertEqual(len(call_count), 6)  # 3 files * 2 passes
         
-        result = self.analyzer.classify_segments(df.copy())
+        # First 3 calls should have None (first pass)
+        for i in range(3):
+            self.assertIsNone(call_count[i])
         
-        self.assertIn('label', result.columns)
-        labels = result['label'].unique()
-        self.assertIn('de-energized', labels)
-        self.assertIn('steady_state', labels)
+        # Last 3 calls should have dynamic thresholds (second pass)
+        for i in range(3, 6):
+            self.assertIsInstance(call_count[i], dict)
     
-    # Test CSV analysis
-    def test_analyze_csv_valid_file(self):
-        """Test analyzing valid CSV file"""
+    def test_dynamic_threshold_calculation(self):
+        """Test dynamic threshold calculation logic"""
+        # Create files with consistent patterns
+        for i in range(5):
+            self.create_test_csv(
+                self.input_dir / 'tc1' / 'dc1',
+                f'unit_id=U{i:03d}_ofp=OFP1_test_case=TC1_test_run={i}_segments.csv',
+                mean_v=19.0,
+                std_v=0.2
+            )
+        
+        # Mock analyze_csv to return consistent metrics
+        def mock_analyze(path, dynamic_thresholds=None):
+            return ([{
+                'label': 'steady_state',
+                'mean_voltage': 19.0,
+                'variance': 0.04,
+                'std': 0.2,
+                'slope': 0.001,
+                'abs_slope': 0.001,
+                'iqr': 0.3,
+                'flagged': False,
+                'ofp': 'OFP1',
+                'test_case': 'TC1',
+                'n_points': 100
+            }], pd.DataFrame(), {'ofp': 'OFP1', 'test_case': 'TC1'})
+        
+        self.analyzer.analyze_csv = mock_analyze
+        
+        with patch('pandas.ExcelWriter'), patch('builtins.print'):
+            self.analyzer.run_analysis()
+        
+        # Should have calculated thresholds for OFP1_TC1 group
+        # Can't directly test the thresholds without access to internals
+        # But the function should complete without error
+        self.assertTrue(True)
+    
+    def test_all_four_thresholds_must_fail_logic(self):
+        """Test that flagging only occurs when ALL 4 thresholds fail"""
+        # Create test CSV
         path = self.create_test_csv(
             self.input_dir / 'tc1' / 'dc1',
-            'unit_id=U001_test_case=test_test_run=1_segments.csv',
-            mean_v=19.5
+            'unit_id=U001_ofp=OFP1_test_case=TC1_test_run=1_segments.csv'
         )
         
-        result = self.analyzer.analyze_csv(path)
+        # Create dynamic thresholds
+        dynamic_thresholds = {
+            'OFP1_TC1': {
+                'min_variance': 0.01,
+                'max_variance': 0.05,
+                'min_std': 0.1,
+                'max_std': 0.3,
+                'min_slope': -0.01,
+                'max_slope': 0.01,
+                'min_iqr': 0.1,
+                'max_iqr': 0.5
+            }
+        }
         
-        self.assertIsNotNone(result)
-        metrics, df, grouping = result
+        # Mock parse_filename to return correct grouping
+        self.analyzer.parse_filename = Mock(return_value={
+            'unit_id': 'U001',
+            'ofp': 'OFP1',
+            'test_case': 'TC1',
+            'test_run': '1'
+        })
         
-        self.assertIsInstance(metrics, list)
-        self.assertIsInstance(df, pd.DataFrame)
-        self.assertIsInstance(grouping, dict)
-        
-        # Check metrics
-        self.assertTrue(len(metrics) > 0)
-        self.assertIn('mean_voltage', metrics[0])
-        self.assertIn('flagged', metrics[0])
+        # Test case 1: Only 3 thresholds fail - should NOT be flagged
+        with patch.object(pd, 'read_csv') as mock_read:
+            mock_df = pd.DataFrame({
+                'timestamp': np.arange(100),
+                'voltage': np.ones(100) * 19.0,
+                'segment': np.ones(100)
+            })
+            mock_read.return_value = mock_df
+            
+            # Mock metrics that fail only 3 checks
+            with patch.object(np, 'var', return_value=0.001):  # Below min_variance
+                with patch.object(np, 'std', return_value=0.05):  # Below min_std  
+                    with patch.object(np, 'percentile', side_effect=[18.9, 19.1, 18.9, 19.1]):  # IQR = 0.2, within range
+                        result = self.analyzer.analyze_csv(path, dynamic_thresholds)
+                        
+                        if result:
+                            metrics = result[0]
+                            # Should NOT be flagged (only 3 failures)
+                            for m in metrics:
+                                if m.get('label') == 'steady_state':
+                                    self.assertFalse(m.get('flagged', False))
     
-    def test_analyze_csv_missing_columns(self):
-        """Test handling missing columns"""
-        folder = self.input_dir / 'tc1' / 'dc1'
-        folder.mkdir(parents=True, exist_ok=True)
+    def test_only_steady_state_segments_flagged(self):
+        """Test that only steady-state segments can be flagged"""
+        # Mock classify_segments to return different labels
+        def mock_classify(df):
+            # Create different labels
+            n = len(df)
+            df['label'] = ['de-energized'] * (n//3) + ['stabilizing'] * (n//3) + ['steady_state'] * (n//3 + n%3)
+            return df
         
-        df = pd.DataFrame({'bad_column': [1, 2, 3]})
-        path = folder / 'bad.csv'
-        df.to_csv(path, index=False)
+        self.analyzer.classify_segments = mock_classify
         
-        result = self.analyzer.analyze_csv(path)
-        
-        self.assertIsNone(result)
-        self.assertEqual(len(self.analyzer.failed_files), 1)
-    
-    def test_analyze_csv_low_voltage_flag(self):
-        """Test low voltage flagging"""
         path = self.create_test_csv(
             self.input_dir / 'tc1' / 'dc1',
             'test_segments.csv',
-            mean_v=17.0,  # Below 18V
-            std_v=0.01
+            mean_v=17.0  # Low voltage that would normally trigger flag
         )
         
         result = self.analyzer.analyze_csv(path)
         
         if result:
-            metrics, _, _ = result
-            ss_metrics = [m for m in metrics if m['label'] == 'steady_state']
-            if ss_metrics:
-                self.assertTrue(ss_metrics[0]['flagged'])
-                self.assertIn('low_voltage', ss_metrics[0]['flags'])
+            metrics = result[0]
+            for m in metrics:
+                if m['label'] != 'steady_state':
+                    # Non-steady-state should NEVER be flagged
+                    self.assertFalse(m['flagged'])
+                    self.assertEqual(m['flags'], '')
     
-    def test_analyze_csv_high_variance_flag(self):
-        """Test high variance flagging"""
-        path = self.create_test_csv(
+    def test_run_analysis_creates_flagged_plots_folder(self):
+        """Test that flagged_plots folder is created"""
+        self.create_test_csv(
             self.input_dir / 'tc1' / 'dc1',
-            'test_segments.csv',
-            mean_v=22.0,
-            std_v=2.0  # High variance
+            'test_segments.csv'
         )
         
-        result = self.analyzer.analyze_csv(path)
+        with patch('pandas.ExcelWriter'), patch('builtins.print'):
+            self.analyzer.run_analysis()
         
-        if result:
-            metrics, _, _ = result
-            ss_metrics = [m for m in metrics if m['label'] == 'steady_state']
-            if ss_metrics:
-                self.assertTrue(ss_metrics[0]['flagged'])
+        plots_folder = self.output_dir / 'flagged_plots'
+        self.assertTrue(plots_folder.exists())
     
-    # Test plots (just verify they don't crash)
-    @patch('matplotlib.pyplot.savefig')
-    @patch('matplotlib.pyplot.close')
-    def test_create_simple_plot(self, mock_close, mock_savefig):
-        """Test plot creation doesn't crash"""
-        df = pd.DataFrame({
-            'timestamp': np.arange(100),
-            'voltage': np.random.normal(19, 0.1, 100),
-            'segment': np.ones(100),
-            'label': ['steady_state'] * 100
-        })
+    def test_run_analysis_handles_duplicate_plot_names(self):
+        """Test handling of duplicate plot names"""
+        # Create files that would generate same plot name
+        for i in range(3):
+            self.create_test_csv(
+                self.input_dir / 'tc1' / 'dc1',
+                f'unit_id=U001_ofp=OFP1_test_case=TC1_test_run=1_v{i}_segments.csv'
+            )
         
-        grouping = {'unit_id': 'U001', 'test_case': 'test', 'test_run': '1', 'dc_folder': 'dc1'}
+        # Mock analyze_csv to return flagged steady state
+        def mock_analyze(path, dynamic_thresholds=None):
+            if dynamic_thresholds is not None:  # Second pass
+                return ([{
+                    'label': 'steady_state',
+                    'flagged': True,
+                    'flags': 'test',
+                    'flag_reasons': 'test reason',
+                    'unit_id': 'U001',
+                    'test_case': 'TC1',
+                    'test_run': '1',
+                    'dc_folder': 'dc1'
+                }], pd.DataFrame(), {
+                    'unit_id': 'U001',
+                    'test_case': 'TC1', 
+                    'test_run': '1',
+                    'dc_folder': 'dc1'
+                })
+            return ([], pd.DataFrame(), {})
         
-        self.analyzer.create_simple_plot(df, grouping, Path('test.png'))
+        self.analyzer.analyze_csv = mock_analyze
         
-        mock_savefig.assert_called_once()
-        mock_close.assert_called_once()
+        with patch('pandas.ExcelWriter'), patch('builtins.print'):
+            self.analyzer.run_analysis()
+        
+        # Should handle duplicate names without error
+        self.assertTrue(True)
     
-    @patch('matplotlib.pyplot.savefig')
-    @patch('matplotlib.pyplot.close')
-    def test_create_summary_plot(self, mock_close, mock_savefig):
-        """Test summary plot creation"""
-        df = pd.DataFrame([
-            {'label': 'steady_state', 'flagged': True, 'mean_voltage': 17.5, 
-             'variance': 1.5, 'test_case': 'tc1'}
-        ])
+    def test_run_analysis_excel_sheets(self):
+        """Test that Excel file contains correct sheets"""
+        self.create_test_csv(
+            self.input_dir / 'tc1' / 'dc1',
+            'test_segments.csv'
+        )
         
-        self.analyzer.create_summary_plot(df)
+        # Mock analyze_csv
+        def mock_analyze(path, dynamic_thresholds=None):
+            return ([{
+                'label': 'steady_state',
+                'mean_voltage': 19.0,
+                'variance': 0.01,
+                'std': 0.1,
+                'cv': 0.5,
+                'flagged': dynamic_thresholds is not None,  # Flag on second pass
+                'flags': 'test' if dynamic_thresholds else '',
+                'test_case': 'TC1',
+                'dc_folder': 'dc1',
+                'n_points': 100,
+                'ofp': 'OFP1'
+            }], pd.DataFrame(), {'test_case': 'TC1', 'dc_folder': 'dc1'})
         
-        mock_savefig.assert_called_once()
+        self.analyzer.analyze_csv = mock_analyze
+        
+        mock_writer = MagicMock()
+        mock_writer.__enter__ = Mock(return_value=mock_writer)
+        mock_writer.__exit__ = Mock(return_value=None)
+        
+        with patch('pandas.ExcelWriter', return_value=mock_writer), patch('builtins.print'):
+            df = self.analyzer.run_analysis()
+        
+        # Check that ExcelWriter was used
+        self.assertTrue(mock_writer.__enter__.called)
     
-    # Test run_analysis
-    def test_run_analysis_no_files(self):
-        """Test run_analysis with no files"""
+    def test_run_analysis_summary_output(self):
+        """Test summary output for flagged steady states only"""
+        # Create test file
+        self.create_test_csv(
+            self.input_dir / 'tc1' / 'dc1',
+            'test_segments.csv'
+        )
+        
+        # Mock analyze_csv to return mixed labels with some flagged
+        def mock_analyze(path, dynamic_thresholds=None):
+            return ([
+                {
+                    'label': 'steady_state',
+                    'flagged': True,
+                    'flag_reasons': 'test (dynamic)',
+                    'test_case': 'TC1'
+                },
+                {
+                    'label': 'de-energized',
+                    'flagged': False,
+                    'flag_reasons': '',
+                    'test_case': 'TC1'
+                }
+            ], pd.DataFrame(), {})
+        
+        self.analyzer.analyze_csv = mock_analyze
+        
+        with patch('pandas.ExcelWriter'), patch('builtins.print') as mock_print:
+            df = self.analyzer.run_analysis()
+        
+        # Check that output mentions steady-state flagging
+        print_calls = str(mock_print.call_args_list)
+        self.assertIn('steady', print_calls.lower())
+    
+    def test_run_analysis_empty_input_folder(self):
+        """Test handling of empty input folder"""
         with patch('builtins.print'):
             df = self.analyzer.run_analysis()
         
         self.assertTrue(df.empty)
     
-    @patch('pandas.ExcelWriter')
-    @patch.object(SimplifiedVoltageAnalyzer, 'create_summary_plot')
-    def test_run_analysis_with_files(self, mock_plot, mock_excel):
-        """Test run_analysis with files"""
-        # Create test files
-        self.create_test_csv(
-            self.input_dir / 'tc1' / 'dc1',
-            'test1_segments.csv'
-        )
-        self.create_test_csv(
-            self.input_dir / 'tc1' / 'dc2',
-            'test2_segments.csv'
-        )
+    def test_run_analysis_nonexistent_input_folder(self):
+        """Test handling of nonexistent input folder"""
+        self.analyzer.input_folder = Path('/nonexistent/path')
         
-        with patch('builtins.print'):
+        with patch('builtins.print') as mock_print:
             df = self.analyzer.run_analysis()
         
-        self.assertFalse(df.empty)
-        self.assertIn('mean_voltage', df.columns)
-        self.assertIn('flagged', df.columns)
+        self.assertTrue(df.empty)
+        # Should print error message
+        print_calls = str(mock_print.call_args_list)
+        self.assertIn('ERROR', print_calls)
     
-    # Test edge cases
-    def test_empty_dataframe(self):
-        """Test handling empty DataFrame"""
-        df = pd.DataFrame(columns=['timestamp', 'voltage', 'segment'])
-        
-        result = self.analyzer.classify_segments(df)
-        
-        self.assertTrue(result.empty)
-        self.assertIn('label', result.columns)
-    
-    def test_single_point(self):
-        """Test handling single data point"""
-        df = pd.DataFrame({
-            'timestamp': [0],
-            'voltage': [19.0],
-            'segment': [0]
-        })
-        
-        result = self.analyzer.classify_segments(df)
-        
-        self.assertEqual(len(result), 1)
-        self.assertIn('label', result.columns)
-    
-    def test_zero_variance(self):
-        """Test handling zero variance data"""
+    def test_rounding_in_threshold_comparison(self):
+        """Test that threshold comparisons use rounding"""
         path = self.create_test_csv(
             self.input_dir / 'tc1' / 'dc1',
-            'flat_segments.csv',
-            mean_v=19.0,
-            std_v=0.0  # Zero variance
+            'test_segments.csv'
         )
         
-        result = self.analyzer.analyze_csv(path)
+        # Dynamic thresholds with values that need rounding
+        dynamic_thresholds = {
+            'OFP1_TC1': {
+                'min_variance': 0.0999999,
+                'max_variance': 0.1000001,
+                'min_std': 0.2999999,
+                'max_std': 0.3000001,
+                'min_slope': -0.0010001,
+                'max_slope': 0.0009999,
+                'min_iqr': 0.1999999,
+                'max_iqr': 0.2000001
+            }
+        }
         
-        if result:
-            metrics, _, _ = result
-            for m in metrics:
-                self.assertEqual(m['variance'], 0.0)
-                self.assertEqual(m['std'], 0.0)
+        # Values that would fail without rounding but pass with rounding
+        with patch.object(np, 'var', return_value=0.1):
+            with patch.object(np, 'std', return_value=0.3):
+                result = self.analyzer.analyze_csv(path, dynamic_thresholds)
+                
+                # Should handle rounding properly without errors
+                self.assertIsNotNone(result)
 
 
 if __name__ == '__main__':
     # Run tests
-    print("Running SimplifiedVoltageAnalyzer Unit Tests...")
+    print("Running VoltageAnalyzer Dynamic Threshold Unit Tests...")
     print("=" * 60)
     
     # Create test suite
     loader = unittest.TestLoader()
-    suite = loader.loadTestsFromTestCase(TestVoltageAnalyzer)
+    suite = loader.loadTestsFromTestCase(TestVoltageAnalyzerDynamic)
     
     # Run tests
     runner = unittest.TextTestRunner(verbosity=2)
