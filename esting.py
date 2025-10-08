@@ -12,28 +12,17 @@ class CSVAnalyzer:
         self.steady_state_thresholds = steady_state_thresholds
         self.failed_files = []
     
-    def validate_csv_columns(self, df: pd.DataFrame, required_columns: List[str]) -> bool:
-        """Validate that DataFrame contains required columns.
-        
-        Args:
-            df: DataFrame to validate
-            required_columns: List of required column names
-            
-        Returns:
-            bool: True if all required columns are present
-        """
-        return all(col in df.columns for col in required_columns)
+
     
 
     
     def calculate_basic_metrics(self, voltage_values: np.ndarray) -> Dict[str, float]:
         """Calculate basic statistical metrics for voltage values.
         
-        Args:
-            voltage_values: Array of voltage measurements
-            
-        Returns:
-            Dictionary containing statistical metrics
+        :param voltage_values: Array of voltage measurements
+        :type voltage_values: np.ndarray
+        :return: Dictionary containing statistical metrics
+        :rtype: Dict[str, float]
         """
         if len(voltage_values) == 0:
             return {}
@@ -59,11 +48,10 @@ class CSVAnalyzer:
     def calculate_slope_metrics(self, voltage_values: np.ndarray) -> Dict[str, float]:
         """Calculate slope and r-squared metrics.
         
-        Args:
-            voltage_values: Array of voltage measurements
-            
-        Returns:
-            Dictionary containing slope, abs_slope, and r_squared
+        :param voltage_values: Array of voltage measurements
+        :type voltage_values: np.ndarray
+        :return: Dictionary containing slope, abs_slope, and r_squared
+        :rtype: Dict[str, float]
         """
         if len(voltage_values) <= 1:
             return {
@@ -96,15 +84,18 @@ class CSVAnalyzer:
     ) -> Tuple[bool, Optional[str]]:
         """Check if a value is within threshold bounds.
         
-        Args:
-            value: Value to check
-            min_threshold: Minimum acceptable value
-            max_threshold: Maximum acceptable value
-            metric_name: Name of metric for error message
-            round_digits: Number of digits to round to
-            
-        Returns:
-            Tuple of (failed: bool, reason: Optional[str])
+        :param value: Value to check
+        :type value: float
+        :param min_threshold: Minimum acceptable value
+        :type min_threshold: float
+        :param max_threshold: Maximum acceptable value
+        :type max_threshold: float
+        :param metric_name: Name of metric for error message
+        :type metric_name: str
+        :param round_digits: Number of digits to round to, defaults to 4
+        :type round_digits: int, optional
+        :return: Tuple of (failed: bool, reason: Optional[str])
+        :rtype: Tuple[bool, Optional[str]]
         """
         value_rounded = round(value, round_digits)
         min_rounded = round(min_threshold, round_digits)
@@ -127,13 +118,14 @@ class CSVAnalyzer:
     ) -> Tuple[bool, List[str]]:
         """Check metrics against dynamic thresholds.
         
-        Args:
-            metrics: Dictionary of calculated metrics
-            thresholds: Dictionary of threshold values
-            round_digits: Number of digits to round to
-            
-        Returns:
-            Tuple of (should_flag: bool, reasons: List[str])
+        :param metrics: Dictionary of calculated metrics
+        :type metrics: Dict[str, float]
+        :param thresholds: Dictionary of threshold values
+        :type thresholds: Dict[str, float]
+        :param round_digits: Number of digits to round to, defaults to 4
+        :type round_digits: int, optional
+        :return: Tuple of (should_flag: bool, reasons: List[str])
+        :rtype: Tuple[bool, List[str]]
         """
         failed_checks = 0
         reasons = []
@@ -197,11 +189,10 @@ class CSVAnalyzer:
     def check_fixed_thresholds(self, metrics: Dict[str, float]) -> Tuple[bool, List[str]]:
         """Check metrics against fixed thresholds.
         
-        Args:
-            metrics: Dictionary of calculated metrics
-            
-        Returns:
-            Tuple of (should_flag: bool, reasons: List[str])
+        :param metrics: Dictionary of calculated metrics
+        :type metrics: Dict[str, float]
+        :return: Tuple of (should_flag: bool, reasons: List[str])
+        :rtype: Tuple[bool, List[str]]
         """
         failed_checks = 0
         reasons = []
@@ -231,14 +222,16 @@ class CSVAnalyzer:
     ) -> Optional[Dict]:
         """Process metrics for a specific label.
         
-        Args:
-            df: DataFrame containing the data
-            label: Label to filter by
-            grouping: Grouping information (OFP, test_case, etc.)
-            dynamic_thresholds: Optional dynamic thresholds
-            
-        Returns:
-            Dictionary of metrics or None if no data
+        :param df: DataFrame containing the data
+        :type df: pd.DataFrame
+        :param label: Label to filter by
+        :type label: str
+        :param grouping: Grouping information (OFP, test_case, etc.)
+        :type grouping: Dict[str, str]
+        :param dynamic_thresholds: Optional dynamic thresholds, defaults to None
+        :type dynamic_thresholds: Optional[Dict[str, Dict[str, float]]], optional
+        :return: Dictionary of metrics or None if no data
+        :rtype: Optional[Dict]
         """
         label_data = df[df['label'] == label]
         voltage_values = label_data['voltage'].values
@@ -279,26 +272,28 @@ class CSVAnalyzer:
     ) -> Optional[Tuple[List[Dict], pd.DataFrame, Dict[str, str]]]:
         """Main method to analyze a CSV file.
         
-        Args:
-            csv_path: Path to the CSV file
-            dynamic_thresholds: Optional dynamic thresholds dictionary
-            
-        Returns:
-            Tuple of (results, dataframe, grouping) or None if failed
+        :param csv_path: Path to the CSV file
+        :type csv_path: Path
+        :param dynamic_thresholds: Optional dynamic thresholds dictionary, defaults to None
+        :type dynamic_thresholds: Optional[Dict[str, Dict[str, float]]], optional
+        :return: Tuple of (results, dataframe, grouping) or None if failed
+        :rtype: Optional[Tuple[List[Dict], pd.DataFrame, Dict[str, str]]]
         """
         try:
             filename = csv_path.name
             grouping = self.parse_filename(filename)
             
-            # Add folder info
-            grouping.update(self.extract_folder_info(csv_path))
+            # Add folder info directly in this method
+            parent_path = csv_path.parent
+            grouping['dc_folder'] = parent_path.name
+            grouping['test_case_folder'] = parent_path.parent.name
             
             # Read CSV
             df = pd.read_csv(csv_path)
             
-            # Validate columns
+            # Check required columns directly in this method
             required_columns = ['voltage', 'timestamp', 'segment']
-            if not self.validate_csv_columns(df, required_columns):
+            if not all(col in df.columns for col in required_columns):
                 self.failed_files.append((filename, "Missing required columns"))
                 return None
             
@@ -320,12 +315,24 @@ class CSVAnalyzer:
     
     # Placeholder methods (would be implemented in full class)
     def parse_filename(self, filename: str) -> Dict[str, str]:
-        """Parse filename to extract grouping information."""
+        """Parse filename to extract grouping information.
+        
+        :param filename: Name of the file to parse
+        :type filename: str
+        :return: Dictionary containing parsed grouping information
+        :rtype: Dict[str, str]
+        """
         # Implementation would go here
         return {'ofp': 'example', 'test_case': 'test'}
     
     def classify_segments(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Classify segments in the dataframe."""
+        """Classify segments in the dataframe.
+        
+        :param df: DataFrame containing segment data
+        :type df: pd.DataFrame
+        :return: DataFrame with classified segments
+        :rtype: pd.DataFrame
+        """
         # Implementation would go here
         return df
 
