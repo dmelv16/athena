@@ -1,0 +1,855 @@
+"""
+Voltage Analysis Module
+
+This module provides comprehensive voltage analysis capabilities with cluster-based
+segment classification and anomaly detection for electrical systems.
+Adapted to work with SteadyStateSegmenter output format.
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from pathlib import Path
+from scipy import stats
+from scipy.stats import zscore, linregress
+from tqdm import tqdm
+import warnings
+from typing import Dict, List, Tuple, Optional
+warnings.filterwarnings('ignore')
+
+
+class SimplifiedVoltageAnalyzer:
+    """
+    Voltage analyzer using cluster-based classification with comprehensive anomaly detection.
+    
+    Adapted to work with pre-segmented data from SteadyStateSegmenter.
+    This analyzer processes voltage time series data that has already been segmented,
+    using the predicted_status classifications (de-energized, stabilizing, 
+    steady_state) provided by the model, and flags anomalies based on statistical thresholds.
+    
+    :param output_folder: Path to output directory for results
+    :type output_folder: str or pathlib.Path
+    
+    :ivar output_folder: Directory for analysis outputs
+    :vartype output_folder: pathlib.Path
+    :ivar deenergized_max: Maximum voltage threshold for de-energized state (2.0V)
+    :vartype deenergized_max: float
+    :ivar operational_min: Minimum voltage for operational state (18.0V)
+    :vartype operational_min: float
+    :ivar operational_max: Maximum voltage for normal operation (29.0V)
+    :vartype operational_max: float
+    :ivar steady_state_thresholds: Thresholds for steady-state anomaly detection
+    :vartype steady_state_thresholds: dict
+    :ivar results: Accumulated analysis results across all groups
+    :vartype results: list
+    :ivar failed_files: List of tuples (group_id, error_message) for failed analyses
+    :vartype failed_files: list
+    
+    .. note::
+       Expects data with columns from translate_model_segments:
+       run_id, timestamp, voltage_28v_dc[1,2]_cal, predicted_status, predicted_cluster
+       Plus grouping columns: ofp, dc, test_case, test_run, save, unit_id, station
+    """
+    
+    def __init__(self, output_folder='voltage_analysis'):
+        """
+        Initialize the voltage analyzer.
+        
+        :param output_folder: Path to output directory for results, defaults to 'voltage_analysis'
+        :type output_folder: str or pathlib.Path, optional
+        :raises: OSError if output directory cannot be created
+        
+        .. code-block:: python
+        
+           analyzer = SimplifiedVoltageAnalyzer('my_analysis_output')
+        """
+        self.output_folder = Path(output_folder)
+        self.output_folder.mkdir(exist_ok=True)
+        
+        # Voltage thresholds for outlier detection
+        self.deenergized_max = 2.0  
+        self.operational_min = 18.0  
+        self.operational_max = 29.0
+        
+        # Only flag anomalies in steady state
+        self.steady_state_thresholds = {
+            'max_variance': 1.0,
+            'max_std': 1.0,
+            'max_slope': 0.05,
+            'max_iqr': 1.0,  # Added IQR threshold
+            'outlier_threshold': 3  # z-score for steady state only
+        }
+        
+        self.results = []
+        self.failed_files = []
+    
+    def calculate_basic_metrics(self, voltage_values: np.ndarray) -> Dict[str, float]:
+        """
+        Calculate basic statistical metrics for voltage values.
+        
+        :param voltage_values: Array of voltage measurements
+        :type voltage_values: np.ndarray
+        :return: Dictionary containing statistical metrics including n_points, mean_voltage,
+                 median_voltage, std, variance, min_voltage, max_voltage, range, q1, q3, iqr, cv
+        :rtype: Dict[str, float]
+        
+        :Example:
+        
+        >>> analyzer = SimplifiedVoltageAnalyzer()
+        >>> metrics = analyzer.calculate_basic_metrics(np.array([28.1, 28.2, 28.0]))
+        >>> print(metrics['mean_voltage'])
+        28.1
+        
+        .. note::
+           Returns empty dict if voltage_values is empty
+        """
+        if len(voltage_values) == 0:
+            return {}
+        
+        mean_val = np.mean(voltage_values)
+        std_val = np.std(voltage_values)
+        
+        return {
+            'n_points': len(voltage_values),
+            'mean_voltage': mean_val,
+            'median_voltage': np.median(voltage_values),
+            'std': std_val,
+            'variance': np.var(voltage_values),
+            'min_voltage': np.min(voltage_values),
+            'max_voltage': np.max(voltage_values),
+            'range': np.max(voltage_values) - np.min(voltage_values),
+            'q1': np.percentile(voltage_values, 25),
+            'q3': np.percentile(voltage_values, 75),
+            'iqr': np.percentile(voltage_values, 75) - np.percentile(voltage_values, 25),
+            'cv': (std_val / mean_val * 100) if mean_val != 0 else 0
+        }
+    
+    def calculate_slope_metrics(self, voltage_values: np.ndarray) -> Dict[str, float]:
+        """
+        Calculate slope and r-squared metrics using linear regression.
+        
+        :param voltage_values: Array of voltage measurements
+        :type voltage_values: np.ndarray
+        :return: Dictionary containing slope, abs_slope, and r_squared values
+        :rtype: Dict[str, float]
+        
+        :Example:
+        
+        >>> analyzer = SimplifiedVoltageAnalyzer()
+        >>> metrics = analyzer.calculate_slope_metrics(np.array([28.0, 28.1, 28.2]))
+        >>> print(metrics['slope'])
+        0.1
+        
+        .. note::
+           Returns zero values for all metrics if array has <= 1 element
+        """
+        if len(voltage_values) <= 1:
+            return {
+                'slope': 0,
+                'abs_slope': 0,
+                'r_squared': 0
+            }
+        
+        try:
+            result = linregress(range(len(voltage_values)), voltage_values)
+            return {
+                'slope': result.slope,
+                'abs_slope': abs(result.slope),
+                'r_squared': result.rvalue ** 2
+            }
+        except Exception:
+            return {
+                'slope': 0,
+                'abs_slope': 0,
+                'r_squared': 0
+            }
+    
+    def check_threshold(
+        self, 
+        value: float, 
+        min_threshold: float, 
+        max_threshold: float,
+        metric_name: str,
+        round_digits: int = 4
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Check if a value is within threshold bounds.
+        
+        :param value: Value to check against thresholds
+        :type value: float
+        :param min_threshold: Minimum acceptable value
+        :type min_threshold: float
+        :param max_threshold: Maximum acceptable value
+        :type max_threshold: float
+        :param metric_name: Name of metric for error message generation
+        :type metric_name: str
+        :param round_digits: Number of decimal digits for rounding, defaults to 4
+        :type round_digits: int, optional
+        :return: Tuple of (failed: bool, reason: Optional[str])
+        :rtype: Tuple[bool, Optional[str]]
+        
+        :Example:
+        
+        >>> analyzer = SimplifiedVoltageAnalyzer()
+        >>> failed, reason = analyzer.check_threshold(1.5, 0.0, 1.0, "Variance")
+        >>> print(failed, reason)
+        True, "Variance 1.500 > 1.000 (dynamic)"
+        """
+        value_rounded = round(value, round_digits)
+        min_rounded = round(min_threshold, round_digits)
+        max_rounded = round(max_threshold, round_digits)
+        
+        if value_rounded < min_rounded:
+            reason = f"{metric_name} {value:.3f} < {min_threshold:.3f} (dynamic)"
+            return True, reason
+        elif value_rounded > max_rounded:
+            reason = f"{metric_name} {value:.3f} > {max_threshold:.3f} (dynamic)"
+            return True, reason
+        
+        return False, None
+    
+    def check_dynamic_thresholds(
+        self, 
+        metrics: Dict[str, float], 
+        thresholds: Dict[str, float],
+        round_digits: int = 4
+    ) -> Tuple[bool, List[str]]:
+        """
+        Check metrics against dynamic thresholds for anomaly detection.
+        
+        Evaluates variance, std, slope, and IQR against provided thresholds.
+        Flags anomaly only if ALL 4 metrics fail their respective thresholds.
+        
+        :param metrics: Dictionary of calculated metrics
+        :type metrics: Dict[str, float]
+        :param thresholds: Dictionary of threshold values (min/max for each metric)
+        :type thresholds: Dict[str, float]
+        :param round_digits: Number of decimal digits for rounding, defaults to 4
+        :type round_digits: int, optional
+        :return: Tuple of (should_flag: bool, reasons: List[str])
+        :rtype: Tuple[bool, List[str]]
+        
+        .. note::
+           Required threshold keys: min_variance, max_variance, min_std, max_std,
+           min_slope, max_slope, min_iqr, max_iqr
+        """
+        failed_checks = 0
+        reasons = []
+        
+        # Check variance
+        if 'min_variance' in thresholds and 'max_variance' in thresholds:
+            failed, reason = self.check_threshold(
+                metrics['variance'], 
+                thresholds['min_variance'], 
+                thresholds['max_variance'],
+                'Variance',
+                round_digits
+            )
+            if failed:
+                failed_checks += 1
+                reasons.append(reason)
+        
+        # Check std
+        if 'min_std' in thresholds and 'max_std' in thresholds:
+            failed, reason = self.check_threshold(
+                metrics['std'], 
+                thresholds['min_std'], 
+                thresholds['max_std'],
+                'Std',
+                round_digits
+            )
+            if failed:
+                failed_checks += 1
+                reasons.append(reason)
+        
+        # Check slope
+        if 'min_slope' in thresholds and 'max_slope' in thresholds:
+            slope_rounded = round(metrics['slope'], round_digits)
+            min_rounded = round(thresholds['min_slope'], round_digits)
+            max_rounded = round(thresholds['max_slope'], round_digits)
+            
+            if slope_rounded < min_rounded or slope_rounded > max_rounded:
+                failed_checks += 1
+                if slope_rounded < min_rounded:
+                    reasons.append(f"Slope {metrics['slope']:.4f} < {thresholds['min_slope']:.4f} (dynamic)")
+                else:
+                    reasons.append(f"Slope {metrics['slope']:.4f} > {thresholds['max_slope']:.4f} (dynamic)")
+        
+        # Check IQR
+        if 'min_iqr' in thresholds and 'max_iqr' in thresholds:
+            failed, reason = self.check_threshold(
+                metrics['iqr'], 
+                thresholds['min_iqr'], 
+                thresholds['max_iqr'],
+                'IQR',
+                round_digits
+            )
+            if failed:
+                failed_checks += 1
+                reasons.append(reason)
+        
+        # Only flag if ALL 4 thresholds failed
+        should_flag = failed_checks == 4
+        return should_flag, reasons if should_flag else []
+    
+    def check_fixed_thresholds(self, metrics: Dict[str, float]) -> Tuple[bool, List[str]]:
+        """
+        Check metrics against fixed thresholds for steady-state anomaly detection.
+        
+        Evaluates variance, std, abs_slope, and IQR against fixed thresholds.
+        Flags anomaly only if ALL 4 metrics exceed their thresholds.
+        
+        :param metrics: Dictionary of calculated metrics
+        :type metrics: Dict[str, float]
+        :return: Tuple of (should_flag: bool, reasons: List[str])
+        :rtype: Tuple[bool, List[str]]
+        
+        .. warning::
+           All 4 thresholds must fail for flagging to occur
+        """
+        failed_checks = 0
+        reasons = []
+        
+        if metrics['variance'] > self.steady_state_thresholds['max_variance']:
+            failed_checks += 1
+            reasons.append(f"Variance {metrics['variance']:.3f} > {self.steady_state_thresholds['max_variance']}")
+        
+        if metrics['std'] > self.steady_state_thresholds['max_std']:
+            failed_checks += 1
+            reasons.append(f"Std {metrics['std']:.3f} > {self.steady_state_thresholds['max_std']}")
+        
+        if metrics['abs_slope'] > self.steady_state_thresholds['max_slope']:
+            failed_checks += 1
+            reasons.append(f"Slope {metrics['abs_slope']:.4f} > {self.steady_state_thresholds['max_slope']}")
+        
+        # Check IQR threshold (adding this as 4th check)
+        max_iqr = self.steady_state_thresholds.get('max_iqr', 1.0)  # Default to 1.0 if not set
+        if metrics.get('iqr', 0) > max_iqr:
+            failed_checks += 1
+            reasons.append(f"IQR {metrics['iqr']:.3f} > {max_iqr}")
+        
+        # Flag if ALL 4 checks fail
+        should_flag = failed_checks == 4
+        return should_flag, reasons if should_flag else []
+    
+    def process_label_metrics(
+        self, 
+        df: pd.DataFrame,
+        voltage_col: str,
+        label: str, 
+        grouping: Dict[str, str],
+        dynamic_thresholds: Optional[Dict[str, Dict[str, float]]] = None
+    ) -> Optional[Dict]:
+        """
+        Process metrics for a specific predicted_status label.
+        
+        Calculates statistical metrics for voltage values with a given status
+        and checks for anomalies if status is steady_state.
+        
+        :param df: DataFrame containing voltage data
+        :type df: pd.DataFrame
+        :param voltage_col: Name of voltage column to analyze
+        :type voltage_col: str
+        :param label: Predicted status value to filter by
+        :type label: str
+        :param grouping: Dictionary containing group identification info
+        :type grouping: Dict[str, str]
+        :param dynamic_thresholds: Optional dynamic thresholds dictionary, defaults to None
+        :type dynamic_thresholds: Optional[Dict[str, Dict[str, float]]], optional
+        :return: Dictionary of metrics including statistics and flagging info, or None if no data
+        :rtype: Optional[Dict]
+        
+        .. note::
+           Only performs anomaly checking for steady_state status
+        """
+        label_data = df[df['predicted_status'] == label]
+        voltage_values = label_data[voltage_col].values
+        
+        # Remove NaN values
+        valid_mask = ~np.isnan(voltage_values)
+        voltage_values = voltage_values[valid_mask]
+        
+        if len(voltage_values) == 0:
+            return None
+        
+        # Calculate all metrics
+        metrics = {**grouping, 'label': label, 'voltage_column': voltage_col}
+        metrics.update(self.calculate_basic_metrics(voltage_values))
+        metrics.update(self.calculate_slope_metrics(voltage_values))
+        
+        # Only flag anomalies for steady state
+        if label == 'steady_state':
+            should_flag = False
+            flag_reasons = []
+            
+            if dynamic_thresholds:
+                group_key = f"{grouping.get('ofp', 'NA')}_{grouping.get('test_case', 'NA')}"
+                if group_key in dynamic_thresholds:
+                    should_flag, flag_reasons = self.check_dynamic_thresholds(
+                        metrics, 
+                        dynamic_thresholds[group_key]
+                    )
+            else:
+                should_flag, flag_reasons = self.check_fixed_thresholds(metrics)
+            
+            metrics['flagged'] = should_flag
+            metrics['flags'] = 'all_thresholds_failed' if should_flag else ''
+            metrics['flag_reasons'] = '; '.join(flag_reasons)
+        else:
+            metrics['flagged'] = False
+            metrics['flags'] = ''
+            metrics['flag_reasons'] = ''
+        
+        return metrics
+    
+    def analyze_group(
+        self, 
+        group_df: pd.DataFrame,
+        voltage_col: str,
+        grouping: Dict[str, str],
+        dynamic_thresholds: Optional[Dict[str, Dict[str, float]]] = None
+    ) -> Tuple[List[Dict], pd.DataFrame]:
+        """
+        Analyze a single group (run_id) for a specific voltage column.
+        
+        Processes all unique predicted_status values within the group and
+        calculates metrics for each.
+        
+        :param group_df: DataFrame for this specific group/run_id
+        :type group_df: pd.DataFrame
+        :param voltage_col: Name of voltage column to analyze
+        :type voltage_col: str
+        :param grouping: Dictionary containing group identification info
+        :type grouping: Dict[str, str]
+        :param dynamic_thresholds: Optional dynamic thresholds dictionary, defaults to None
+        :type dynamic_thresholds: Optional[Dict[str, Dict[str, float]]], optional
+        :return: Tuple of (results list, analyzed DataFrame)
+        :rtype: Tuple[List[Dict], pd.DataFrame]
+        """
+        results = []
+        
+        # Process each unique predicted_status
+        for label in group_df['predicted_status'].unique():
+            metrics = self.process_label_metrics(
+                group_df, voltage_col, label, grouping, dynamic_thresholds
+            )
+            if metrics is not None:
+                results.append(metrics)
+        
+        return results, group_df
+    
+    def create_simple_plot(self, df, voltage_col, grouping, output_path):
+        """
+        Create diagnostic plot showing voltage data and flagging reasons.
+        
+        Generates a two-panel plot with voltage time series on top and
+        segment visualization on bottom, including flagging information.
+        
+        :param df: DataFrame containing voltage data with predicted_status and predicted_cluster
+        :type df: pd.DataFrame
+        :param voltage_col: Name of voltage column to plot
+        :type voltage_col: str
+        :param grouping: Dictionary containing group identification info
+        :type grouping: Dict
+        :param output_path: Full path where plot should be saved
+        :type output_path: pathlib.Path
+        :raises: IOError if plot cannot be saved
+        
+        .. note::
+           Plot uses scatter points without connecting lines.
+           Title color is red for flagged files, black otherwise.
+        """
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), height_ratios=[3, 1])
+        
+        colors = {
+            'de-energized': 'gray',
+            'stabilizing': 'orange',
+            'steady_state': 'green',
+            'unidentified': 'purple'
+        }
+        
+        # Main voltage plot - SCATTER ONLY (no lines)
+        for label in df['predicted_status'].unique():
+            label_data = df[df['predicted_status'] == label]
+            ax1.scatter(label_data['timestamp'], label_data[voltage_col],
+                       color=colors.get(label, 'black'),
+                       label=label, s=15, alpha=0.7, edgecolors='none')
+        
+        # Add reference lines
+        ax1.axhline(y=self.operational_min, color='red', linestyle='--', alpha=0.5, 
+                   label='18V threshold', linewidth=2)
+        ax1.axhline(y=self.deenergized_max, color='gray', linestyle='--', alpha=0.3)
+        
+        # Get flagging info for steady state only
+        flagged_info = []
+        if 'steady_state' in df['predicted_status'].values:
+            # Get flag reasons from our results
+            for result in self.results:
+                if (result.get('label') == 'steady_state' and 
+                    result.get('run_id') == grouping.get('run_id') and
+                    result.get('voltage_column') == voltage_col):
+                    
+                    if result.get('flagged'):
+                        flagged_info.append(f"FLAGGED: {result.get('flag_reasons', 'Unknown reason')}")
+                    
+                    # Add statistics text
+                    stats_text = (f"Mean: {result.get('mean_voltage', 0):.2f}V | "
+                                f"Std: {result.get('std', 0):.3f} | "
+                                f"Var: {result.get('variance', 0):.3f} | "
+                                f"Slope: {result.get('abs_slope', 0):.4f}")
+                    flagged_info.append(stats_text)
+                    break
+        
+        # Title with all info
+        dc_name = voltage_col.replace('voltage_28v_', '').replace('_cal', '')
+        title = (f"Unit: {grouping.get('unit_id', 'NA')} | "
+                f"Test Case: {grouping.get('test_case', 'NA')} | "
+                f"Run: {grouping.get('test_run', 'NA')} | "
+                f"DC: {dc_name}")
+        
+        if flagged_info:
+            title += f"\n{' | '.join(flagged_info)}"
+        
+        ax1.set_title(title, fontsize=11, color='red' if any('FLAGGED' in s for s in flagged_info) else 'black')
+        ax1.set_xlabel('Timestamp', fontsize=10)
+        ax1.set_ylabel('Voltage (V)', fontsize=10)
+        ax1.legend(loc='best', fontsize=8)
+        ax1.grid(True, alpha=0.3)
+        
+        # Segment visualization at bottom using predicted_cluster
+        segment_colors = plt.cm.tab10(np.linspace(0, 1, len(df['predicted_cluster'].unique())))
+        for i, seg in enumerate(df['predicted_cluster'].unique()):
+            seg_data = df[df['predicted_cluster'] == seg]
+            ax2.scatter(seg_data['timestamp'], [seg]*len(seg_data), 
+                       color=segment_colors[i], s=10, alpha=0.7, label=f'Seg {seg}')
+        
+        ax2.set_xlabel('Timestamp', fontsize=10)
+        ax2.set_ylabel('Segment ID', fontsize=10)
+        ax2.set_title('Predicted Clusters', fontsize=10)
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=100)
+        plt.close()
+    
+    def create_summary_plot(self, all_results_df):
+        """
+        Create summary visualization of all flagged anomalies.
+        
+        Generates a 2x2 grid of plots showing:
+        
+        * Flagged items by test case
+        * Flagged items by label type
+        * Voltage distribution of flagged steady states
+        * Variance distribution of flagged items
+        
+        :param all_results_df: Combined results DataFrame from all analyzed groups
+        :type all_results_df: pd.DataFrame
+        :raises: ValueError if DataFrame is empty or missing required columns
+        
+        .. note::
+           Only creates plot if there are flagged items.
+           Saves to self.output_folder/summary_flagged.png
+        """
+        if all_results_df.empty or 'flagged' not in all_results_df.columns:
+            print("No data to create summary plot")
+            return
+            
+        if not any(all_results_df['flagged']):
+            print("No flagged items to plot")
+            return
+        
+        flagged = all_results_df[all_results_df['flagged']]
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # Plot 1: Flagged items by test case
+        ax = axes[0, 0]
+        if 'test_case' in flagged.columns:
+            test_cases = flagged['test_case'].value_counts()
+            ax.bar(range(len(test_cases)), test_cases.values, color='coral')
+            ax.set_xticks(range(len(test_cases)))
+            ax.set_xticklabels(test_cases.index, rotation=45, ha='right', fontsize=8)
+            ax.set_title('Flagged Items by Test Case')
+            ax.set_ylabel('Count')
+        
+        # Plot 2: Flagged items by label type
+        ax = axes[0, 1]
+        label_counts = flagged['label'].value_counts()
+        colors_map = {'steady_state': 'green', 'voltage_outlier': 'red', 'unidentified': 'purple'}
+        colors = [colors_map.get(x, 'gray') for x in label_counts.index]
+        ax.bar(range(len(label_counts)), label_counts.values, color=colors)
+        ax.set_xticks(range(len(label_counts)))
+        ax.set_xticklabels(label_counts.index, rotation=45, ha='right')
+        ax.set_title('Flagged Items by Label Type')
+        ax.set_ylabel('Count')
+        
+        # Plot 3: Voltage distribution of flagged steady states
+        ax = axes[1, 0]
+        ss_flagged = flagged[flagged['label'] == 'steady_state']
+        if not ss_flagged.empty:
+            ax.hist(ss_flagged['mean_voltage'], bins=20, edgecolor='black', color='green', alpha=0.7)
+            ax.axvline(x=self.operational_min, color='red', linestyle='--', alpha=0.5)
+            ax.axvline(x=self.operational_max, color='red', linestyle='--', alpha=0.5)
+            ax.set_title('Voltage Distribution - Flagged Steady States')
+            ax.set_xlabel('Mean Voltage (V)')
+            ax.set_ylabel('Count')
+        
+        # Plot 4: Variance distribution
+        ax = axes[1, 1]
+        if 'variance' in flagged.columns:
+            ax.hist(flagged['variance'], bins=20, edgecolor='black', color='blue', alpha=0.7)
+            ax.axvline(x=self.steady_state_thresholds['max_variance'], 
+                      color='red', linestyle='--', alpha=0.5, 
+                      label=f"Threshold: {self.steady_state_thresholds['max_variance']}")
+            ax.set_title('Variance Distribution - Flagged Items')
+            ax.set_xlabel('Variance')
+            ax.set_ylabel('Count')
+            ax.legend()
+        
+        plt.suptitle('Summary of Flagged Anomalies', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        
+        output_path = self.output_folder / 'summary_flagged.png'
+        plt.savefig(output_path, dpi=100)
+        plt.close()
+        print(f"Summary plot saved to: {output_path}")
+    
+    def run_analysis(self, data: pd.DataFrame):
+        """
+        Execute complete voltage analysis pipeline on pre-segmented data.
+        
+        Processes all groups in the input data, generates plots for flagged groups,
+        creates Excel reports, and produces summary visualizations.
+        
+        :param data: DataFrame with columns from translate_model_segments
+        :type data: pd.DataFrame
+        :return: Combined results DataFrame containing all segment metrics, statistics,
+                 flagging information, and metadata
+        :rtype: pd.DataFrame
+        
+        :raises: ValueError if no voltage columns are found
+        
+        :Example:
+        
+        >>> analyzer = SimplifiedVoltageAnalyzer('output_folder')
+        >>> data = pd.read_parquet('segmented_data.parquet')
+        >>> results = analyzer.run_analysis(data)
+        >>> print(f"Analyzed {len(results)} segments")
+        
+        .. note::
+           Expected columns in data:
+           
+           * run_id: Unique identifier per group
+           * timestamp: Time values
+           * voltage_28v_dc1_cal and/or voltage_28v_dc2_cal: Voltage data
+           * predicted_status: Classification from model
+           * predicted_cluster: Segment IDs
+           * Grouping columns: ofp, dc, test_case, test_run, save, unit_id, station
+           
+        .. warning::
+           Creates output folder structure with flagged_plots subdirectory.
+           Overwrites existing files with same names.
+        """
+        print("="*60)
+        print("VOLTAGE ANALYSIS WITH CLUSTER CLASSIFICATION")
+        print("="*60)
+        print(f"Output folder: {self.output_folder}")
+        
+        # Identify voltage columns
+        voltage_columns = []
+        for col in ['voltage_28v_dc1_cal', 'voltage_28v_dc2_cal']:
+            if col in data.columns:
+                voltage_columns.append(col)
+                print(f"Found voltage column: {col}")
+        
+        if not voltage_columns:
+            print("No voltage columns found!")
+            return pd.DataFrame()
+        
+        # Get unique run_ids
+        unique_runs = data['run_id'].unique()
+        print(f"\nTotal groups to process: {len(unique_runs)}")
+        
+        # Process each group
+        all_results = []
+        flagged_files = []
+        
+        for run_id in tqdm(unique_runs, desc="Processing"):
+            group_df = data[data['run_id'] == run_id].copy()
+            
+            # Get grouping info from first row
+            first_row = group_df.iloc[0]
+            grouping = {
+                'run_id': run_id,
+                'ofp': first_row.get('ofp', 'NA'),
+                'test_case': first_row.get('test_case', 'NA'),
+                'test_run': first_row.get('test_run', 'NA'),
+                'save': first_row.get('save', 'NA'),
+                'unit_id': first_row.get('unit_id', 'NA'),
+                'station': first_row.get('station', 'NA'),
+                'dc': first_row.get('dc', 'NA')
+            }
+            
+            # Process each voltage column
+            for voltage_col in voltage_columns:
+                if voltage_col not in group_df.columns:
+                    continue
+                
+                # Analyze this group/voltage combination
+                try:
+                    file_results, analyzed_df = self.analyze_group(
+                        group_df, voltage_col, grouping
+                    )
+                    all_results.extend(file_results)
+                    
+                    # Check if any segment is flagged
+                    if any(r.get('flagged', False) for r in file_results):
+                        flagged_files.append((analyzed_df, voltage_col, grouping))
+                        
+                except Exception as e:
+                    self.failed_files.append((run_id, str(e)))
+        
+        # Store results for use in plotting
+        self.results = all_results
+        
+        # Create results dataframe
+        results_df = pd.DataFrame(all_results) if all_results else pd.DataFrame()
+        
+        # Create output folders
+        plots_folder = self.output_folder / 'flagged_plots'
+        plots_folder.mkdir(exist_ok=True)
+        
+        # Generate plots only for flagged files
+        if flagged_files:
+            print(f"\nGenerating plots for {len(flagged_files)} flagged groups...")
+            for df, voltage_col, grouping in tqdm(flagged_files, desc="Creating plots"):
+                # Simple filename including DC info
+                dc_name = voltage_col.replace('voltage_28v_', '').replace('_cal', '')
+                plot_name = (f"{grouping.get('unit_id', 'NA')}_"
+                           f"{grouping.get('test_case', 'NA')}_"
+                           f"run{grouping.get('test_run', 'NA')}_"
+                           f"{dc_name}.png")
+                plot_path = plots_folder / plot_name
+                self.create_simple_plot(df, voltage_col, grouping, plot_path)
+        else:
+            print("\nNo flagged files found - no plots to generate")
+        
+        # Save Excel report
+        if not results_df.empty:
+            excel_path = self.output_folder / 'analysis_results.xlsx'
+            with pd.ExcelWriter(excel_path) as writer:
+                # All results
+                results_df.to_excel(writer, sheet_name='All_Results', index=False)
+                
+                # Only flagged
+                if 'flagged' in results_df.columns:
+                    flagged_df = results_df[results_df['flagged'] == True]
+                    if not flagged_df.empty:
+                        flagged_df.to_excel(writer, sheet_name='Flagged_Only', index=False)
+                        
+                        # Summary statistics by test case and label
+                        summary = results_df.groupby(['test_case', 'label']).agg({
+                            'mean_voltage': ['mean', 'std', 'min', 'max'],
+                            'variance': ['mean', 'max'],
+                            'n_points': 'sum',
+                            'flagged': 'sum'
+                        }).round(3)
+                        summary.to_excel(writer, sheet_name='Summary_Stats')
+                        
+                        # DC comparison
+                        if 'voltage_column' in results_df.columns:
+                            dc_summary = results_df.groupby(['voltage_column', 'label']).agg({
+                                'mean_voltage': ['mean', 'std'],
+                                'flagged': 'sum',
+                                'n_points': 'sum'
+                            }).round(3)
+                            dc_summary.to_excel(writer, sheet_name='DC_Comparison')
+            
+            print(f"\nExcel report saved to: {excel_path}")
+            
+            # Create summary plot
+            self.create_summary_plot(results_df)
+        
+        # Print summary
+        print("\n" + "="*60)
+        print("ANALYSIS COMPLETE")
+        print("="*60)
+        print(f"Total segments analyzed: {len(results_df)}")
+        
+        if 'flagged' in results_df.columns:
+            n_flagged = results_df['flagged'].sum()
+            print(f"Flagged segments: {n_flagged}")
+            
+            if n_flagged > 0:
+                print("\nFlagged breakdown by label:")
+                for label in results_df[results_df['flagged']]['label'].unique():
+                    count = len(results_df[(results_df['flagged']) & (results_df['label'] == label)])
+                    print(f"  {label}: {count}")
+                
+                print("\nFlagged breakdown by test case:")
+                if 'test_case' in results_df.columns:
+                    for tc in results_df[results_df['flagged']]['test_case'].unique():
+                        count = len(results_df[(results_df['flagged']) & (results_df['test_case'] == tc)])
+                        print(f"  {tc}: {count}")
+        
+        if self.failed_files:
+            print(f"\n{len(self.failed_files)} groups failed to process")
+            for filename, error in self.failed_files[:5]:
+                print(f"  {filename}: {error}")
+        
+        print(f"\nOutputs:")
+        print(f"  Excel: {self.output_folder}/analysis_results.xlsx")
+        print(f"  Plots: {self.output_folder}/flagged_plots/")
+        print(f"  Summary: {self.output_folder}/summary_flagged.png")
+        
+        return results_df
+
+
+def main():
+    """
+    Main entry point for voltage analysis.
+    
+    To be called after SteadyStateSegmenter processing.
+    
+    :return: Analysis results DataFrame
+    :rtype: pd.DataFrame
+    
+    :Example:
+    
+    .. code-block:: python
+    
+       # Your colleague's model workflow
+       model = SteadyStateSegmenter()
+       data = pd.read_parquet(DATA_PATH, engine='pyarrow')
+       
+       # Process each voltage column
+       for voltage_col in ['voltage_28v_dc1_cal', 'voltage_28v_dc2_cal']:
+           model.load_data(data, voltage_col)
+           model.predict()
+       
+       # Run our analysis
+       analyzer = SimplifiedVoltageAnalyzer(output_folder='voltage_analysis')
+       results = analyzer.run_analysis(data)
+    
+    .. note::
+       Expects environment variable DATA_PATH or uses default 'segmentation_output.parquet'
+    """
+    
+    # Load the segmented data (either from model output or parquet file)
+    DATA_PATH = "segmentation_output.parquet"  # Replace with your file
+    data = pd.read_parquet(DATA_PATH, engine='pyarrow')
+    
+    # Create analyzer and run
+    analyzer = SimplifiedVoltageAnalyzer(
+        output_folder='voltage_analysis'
+    )
+    
+    results = analyzer.run_analysis(data)
+    
+    return results
+
+
+if __name__ == "__main__":
+    main()
