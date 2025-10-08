@@ -37,13 +37,18 @@ def process_parquet():
     print(f"Total rows: {total_rows:,}")
     print(f"Row groups: {num_row_groups}\n")
     
-    # Check if columns exist
-    schema = parquet_file.schema_arrow
-    missing = [col for col in GROUPING_COLUMNS if col not in schema.names]
+    # Get original schema and check columns
+    original_schema = parquet_file.schema_arrow
+    missing = [col for col in GROUPING_COLUMNS if col not in original_schema.names]
     if missing:
         print(f"❌ ERROR: These columns don't exist: {missing}")
-        print(f"Available columns: {schema.names}")
+        print(f"Available columns: {original_schema.names}")
         return
+    
+    # Create the new schema with run_id column added
+    new_fields = list(original_schema)
+    new_fields.append(pa.field('run_id', pa.string()))
+    output_schema = pa.schema(new_fields)
     
     # Cache for run_ids
     run_id_cache = {}
@@ -61,28 +66,37 @@ def process_parquet():
                     batch_end = min(batch_start + CHUNK_SIZE, row_group.num_rows)
                     batch = row_group.slice(batch_start, batch_end - batch_start)
                     
-                    # Convert to pandas
-                    df = batch.to_pandas()
+                    # Keep as Arrow table instead of converting to pandas
+                    # This maintains schema consistency
+                    batch_dict = batch.to_pydict()
                     
                     # Generate run_ids
                     run_ids = []
-                    for _, row in df[GROUPING_COLUMNS].iterrows():
-                        key = tuple(row.values)
+                    num_rows = len(batch_dict[next(iter(batch_dict))])  # Get row count
+                    
+                    for row_idx in range(num_rows):
+                        # Get values for this row's grouping columns
+                        row_values = []
+                        for col in GROUPING_COLUMNS:
+                            val = batch_dict[col][row_idx]
+                            row_values.append(val)
+                        
+                        key = tuple(row_values)
                         if key not in run_id_cache:
-                            run_id_cache[key] = create_run_id(row.values)
+                            run_id_cache[key] = create_run_id(row_values)
                         run_ids.append(run_id_cache[key])
                     
-                    # Add run_id column
-                    df['run_id'] = run_ids
+                    # Add run_id to the dictionary
+                    batch_dict['run_id'] = run_ids
                     
-                    # Convert back to Arrow
-                    table = pa.Table.from_pandas(df)
+                    # Create table with explicit schema
+                    table = pa.Table.from_pydict(batch_dict, schema=output_schema)
                     
                     # Initialize writer on first batch
                     if writer is None:
                         writer = pq.ParquetWriter(
                             OUTPUT_FILE,
-                            table.schema,
+                            output_schema,  # Use consistent schema
                             compression='snappy',
                             use_dictionary=True,
                             data_page_size=1024*1024
@@ -90,11 +104,11 @@ def process_parquet():
                     
                     # Write batch
                     writer.write_table(table)
-                    processed_rows += len(df)
-                    pbar.update(len(df))
+                    processed_rows += num_rows
+                    pbar.update(num_rows)
                     
                     # Clean up memory
-                    del df, table, batch
+                    del batch_dict, table, batch
                     if processed_rows % (CHUNK_SIZE * 10) == 0:
                         gc.collect()
                 
