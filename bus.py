@@ -1842,7 +1842,7 @@ class StreamlinedBusMonitorDashboard:
         print(f"\nExcel file saved to: {excel_path.absolute()}")
         return excel_path
 
-    def create_interactive_dashboard(self):
+ def create_interactive_dashboard(self):
         """Create an enhanced interactive HTML dashboard with comprehensive filters and analytics"""
         import json
         from datetime import datetime
@@ -1872,25 +1872,39 @@ class StreamlinedBusMonitorDashboard:
         if self.df_test_case_bus_flips is not None and not self.df_test_case_bus_flips.empty:
             test_case_flip_data = self.df_test_case_bus_flips.to_dict('records')
         
-        # Prepare message rates data with simplified structure
+        # Prepare message rates data - convert to messages/second properly
         message_rates_data = []
         if hasattr(self, 'df_message_rates_summary') and self.df_message_rates_summary is not None:
-            message_rates_data = self.df_message_rates_summary.to_dict('records')
+            df_rates_temp = self.df_message_rates_summary.copy()
+            # Convert milliseconds to messages per second (1000/ms = msgs/sec)
+            for col in ['avg_time_diff_ms', 'min_time_diff_ms', 'max_time_diff_ms', 'median_time_diff_ms']:
+                if col in df_rates_temp.columns:
+                    df_rates_temp[f'{col.replace("_time_diff_ms", "_rate")}'] = 1000 / df_rates_temp[col]
+            message_rates_data = df_rates_temp.to_dict('records')
         
-        # Prepare message rates by location
+        # Prepare message rates by location with proper conversion
         message_rates_by_location = []
         if self.df_message_rates is not None and not self.df_message_rates.empty:
-            message_rates_by_location = self.df_message_rates.to_dict('records')
+            df_loc_temp = self.df_message_rates.copy()
+            # Add rate calculations
+            df_loc_temp['msg_per_sec'] = 1000 / df_loc_temp['avg_time_diff_ms']
+            df_loc_temp['min_rate'] = 1000 / df_loc_temp['max_time_diff_ms']  # min rate = 1000/max time
+            df_loc_temp['max_rate'] = 1000 / df_loc_temp['min_time_diff_ms']  # max rate = 1000/min time
+            message_rates_by_location = df_loc_temp.to_dict('records')
         
         # Prepare failed requirements data
         failed_requirements_data = []
         if hasattr(self, 'df_failed_requirements_analysis') and self.df_failed_requirements_analysis is not None:
             failed_requirements_data = self.df_failed_requirements_analysis.to_dict('records')
         
-        # Prepare requirements at risk data
+        # Prepare requirements at risk data with proper test case info
         requirements_at_risk_data = []
         if self.df_requirements_at_risk is not None and not self.df_requirements_at_risk.empty:
-            requirements_at_risk_data = self.df_requirements_at_risk.to_dict('records')
+            df_req_temp = self.df_requirements_at_risk.copy()
+            # Ensure test_cases_affected is a string
+            if 'test_cases_affected' in df_req_temp.columns:
+                df_req_temp['test_cases_affected'] = df_req_temp['test_cases_affected'].astype(str)
+            requirements_at_risk_data = df_req_temp.to_dict('records')
         
         # Get unique values for filters
         unit_ids = sorted(self.df_flips['unit_id'].unique().tolist()) if self.df_flips is not None else []
@@ -2261,6 +2275,15 @@ class StreamlinedBusMonitorDashboard:
                     </div>
                     
                     <div class="chart-container">
+                        <div class="chart-title">Test Cases Over Time</div>
+                        <div class="info-box">
+                            <strong>Test Case Timeline:</strong> Shows when test cases were executed and their duration.
+                            Orange bars indicate test cases that had bus flips.
+                        </div>
+                        <div id="testCaseTimeline"></div>
+                    </div>
+                    
+                    <div class="chart-container">
                         <div class="chart-title">Hourly Bus Flip Distribution</div>
                         <div id="hourlyChart"></div>
                     </div>
@@ -2274,26 +2297,26 @@ class StreamlinedBusMonitorDashboard:
                 <!-- Message Rates Tab -->
                 <div id="rates-tab" class="tab-content">
                     <div class="chart-container">
-                        <div class="chart-title">High-Frequency Message Types (Top 20)</div>
+                        <div class="chart-title">Message Rate Statistics by Type</div>
                         <div class="info-box">
-                            <strong>Message Rate Analysis:</strong> Shows message types sorted by transmission rate. 
-                            Lower time differences indicate higher message frequencies. Critical range: 0.3-1ms.
+                            <strong>Message Rate Analysis:</strong> Shows messages per second for each message type.
+                            Higher rates indicate more frequent transmissions. Critical: >1000 msg/s, Warning: >100 msg/s.
                         </div>
-                        <div id="messageRatesByType"></div>
+                        <div id="messageRateStats"></div>
                     </div>
                     
                     <div class="chart-container">
-                        <div class="chart-title">Station Message Rates</div>
-                        <div id="stationRates"></div>
+                        <div class="chart-title">Station Message Rate Summary</div>
+                        <div id="stationRateSummary"></div>
                     </div>
                     
                     <div class="chart-container">
-                        <div class="chart-title">Station-Save Combinations by Rate</div>
-                        <div id="stationSaveRates"></div>
+                        <div class="chart-title">High-Frequency Station-Save Combinations</div>
+                        <div id="stationSaveHighFreq"></div>
                     </div>
                     
                     <div class="chart-container">
-                        <div class="chart-title">Message Rate Statistics</div>
+                        <div class="chart-title">Message Rate Metrics</div>
                         <div class="metric-grid" id="rateMetrics"></div>
                     </div>
                 </div>
@@ -2566,7 +2589,7 @@ class StreamlinedBusMonitorDashboard:
                 }}).length;
                 
                 // Calculate flip percentage
-                const flipPercentage = {flip_percentage.toFixed(4)};
+                const flipPercentage = {flip_percentage:.4f};
                 
                 statsRow.innerHTML = `
                     <div class="stat-card">
@@ -2574,7 +2597,7 @@ class StreamlinedBusMonitorDashboard:
                         <div class="stat-label">Bus Flips</div>
                     </div>
                     <div class="stat-card warning">
-                        <div class="stat-value">${{flipPercentage}}%</div>
+                        <div class="stat-value">${{flipPercentage.toFixed(4)}}%</div>
                         <div class="stat-label">Of Total Messages</div>
                     </div>
                     <div class="stat-card warning">
@@ -2834,6 +2857,58 @@ class StreamlinedBusMonitorDashboard:
                     yaxis: {{ title: 'Bus Flips per Hour' }}
                 }});
                 
+                // Test Case Timeline
+                if (filteredTestCaseData.length > 0) {{
+                    // Prepare test case timeline data
+                    const testCaseTimelineData = [];
+                    
+                    filteredTestCaseData.forEach((tc, index) => {{
+                        const startTime = parseFloat(tc.timestamp_start);
+                        const endTime = parseFloat(tc.timestamp_end || tc.timestamp_start);
+                        const duration = endTime - startTime;
+                        
+                        // Check if this test case had bus flips
+                        const hasFlips = testCaseFlipData.some(tf => 
+                            tf.test_case_id === tc.test_case_id &&
+                            tf.unit_id === tc.unit_id &&
+                            tf.station === tc.station &&
+                            tf.save === tc.save &&
+                            tf.total_bus_flips > 0
+                        );
+                        
+                        testCaseTimelineData.push({{
+                            x: [new Date(startTime * 1000), new Date(endTime * 1000)],
+                            y: [index, index],
+                            mode: 'lines',
+                            type: 'scatter',
+                            line: {{
+                                color: hasFlips ? '#e74c3c' : '#3498db',
+                                width: 10
+                            }},
+                            name: tc.test_case_id,
+                            hovertemplate: `Test Case: ${{tc.test_case_id}}<br>` +
+                                        `Location: ${{tc.unit_id}}-${{tc.station}}-${{tc.save}}<br>` +
+                                        `Duration: ${{duration.toFixed(2)}}s<br>` +
+                                        `Has Flips: ${{hasFlips ? 'Yes' : 'No'}}<extra></extra>`
+                        }});
+                    }});
+                    
+                    Plotly.newPlot('testCaseTimeline', testCaseTimelineData, {{
+                        margin: {{ t: 10, b: 100, l: 150, r: 20 }},
+                        xaxis: {{ title: 'Time', type: 'date' }},
+                        yaxis: {{ 
+                            title: 'Test Cases',
+                            tickmode: 'array',
+                            tickvals: Array.from({{length: filteredTestCaseData.length}}, (_, i) => i),
+                            ticktext: filteredTestCaseData.map(tc => tc.test_case_id)
+                        }},
+                        showlegend: false,
+                        height: Math.max(400, filteredTestCaseData.length * 20)
+                    }});
+                }} else {{
+                    document.getElementById('testCaseTimeline').innerHTML = '<p>No test case data available</p>';
+                }}
+                
                 // Hourly distribution
                 const hourlyData = filteredFlipsData.map(d => {{
                     const date = new Date(parseFloat(d.timestamp_busA) * 1000);
@@ -2888,133 +2963,209 @@ class StreamlinedBusMonitorDashboard:
             }}
             
             function drawMessageRateCharts() {{
-                // High-frequency message types
+                // Message Rate Statistics by Type
                 if (messageRatesData.length > 0) {{
-                    const sortedRates = [...messageRatesData].sort((a, b) => a.avg_time_diff_ms - b.avg_time_diff_ms);
-                    const topHighFreq = sortedRates.slice(0, 20);
+                    // Create box plots for message rates
+                    const traceData = [];
                     
-                    Plotly.newPlot('messageRatesByType', [{{
-                        x: topHighFreq.map(d => d.msg_type),
-                        y: topHighFreq.map(d => d.avg_time_diff_ms),
+                    messageRatesData.forEach(msgType => {{
+                        if (msgType.avg_rate && msgType.min_rate && msgType.max_rate) {{
+                            traceData.push({{
+                                y: [msgType.min_rate, msgType.avg_rate, msgType.max_rate],
+                                type: 'box',
+                                name: msgType.msg_type,
+                                boxmean: 'sd'
+                            }});
+                        }}
+                    }});
+                    
+                    // If we have rate data, show top 20 by average rate
+                    const sortedByRate = [...messageRatesData]
+                        .filter(d => d.avg_rate)
+                        .sort((a, b) => b.avg_rate - a.avg_rate)
+                        .slice(0, 20);
+                    
+                    Plotly.newPlot('messageRateStats', [{{
+                        x: sortedByRate.map(d => d.msg_type),
+                        y: sortedByRate.map(d => d.avg_rate || 0),
+                        error_y: {{
+                            type: 'data',
+                            symmetric: false,
+                            array: sortedByRate.map(d => (d.max_rate || d.avg_rate) - d.avg_rate),
+                            arrayminus: sortedByRate.map(d => d.avg_rate - (d.min_rate || d.avg_rate))
+                        }},
                         type: 'bar',
                         marker: {{
-                            color: topHighFreq.map(d => 
-                                d.avg_time_diff_ms < 1 ? '#e74c3c' : 
-                                d.avg_time_diff_ms < 10 ? '#f39c12' : '#3498db'
+                            color: sortedByRate.map(d => 
+                                d.avg_rate > 1000 ? '#e74c3c' : 
+                                d.avg_rate > 100 ? '#f39c12' : '#3498db'
                             )
                         }},
-                        text: topHighFreq.map(d => `${{d.avg_time_diff_ms.toFixed(3)}}ms`),
+                        text: sortedByRate.map(d => `${{d.avg_rate ? d.avg_rate.toFixed(1) : 0}} msg/s`),
                         textposition: 'auto'
                     }}], {{
                         margin: {{ t: 10, b: 100, l: 60, r: 20 }},
                         xaxis: {{ title: 'Message Type', tickangle: -45 }},
-                        yaxis: {{ title: 'Avg Time Between Messages (ms)', type: 'log' }}
+                        yaxis: {{ title: 'Messages per Second', type: 'log' }}
                     }});
                 }} else {{
-                    document.getElementById('messageRatesByType').innerHTML = '<p>No message rate data available</p>';
+                    document.getElementById('messageRateStats').innerHTML = '<p>No message rate data available</p>';
                 }}
                 
-                // Station rates
+                // Station Rate Summary - Aggregate properly
                 if (filteredMessageRatesByLocation.length > 0) {{
-                    const stationRates = {{}};
+                    const stationStats = {{}};
+                    
+                    // Group by station and calculate statistics
                     filteredMessageRatesByLocation.forEach(d => {{
-                        if (!stationRates[d.station]) {{
-                            stationRates[d.station] = [];
+                        if (!stationStats[d.station]) {{
+                            stationStats[d.station] = {{
+                                rates: [],
+                                msgTypes: new Set(),
+                                units: new Set(),
+                                saves: new Set()
+                            }};
                         }}
-                        stationRates[d.station].push(d.avg_time_diff_ms);
+                        if (d.msg_per_sec) {{
+                            stationStats[d.station].rates.push(d.msg_per_sec);
+                            stationStats[d.station].msgTypes.add(d.msg_type);
+                            stationStats[d.station].units.add(d.unit_id);
+                            stationStats[d.station].saves.add(d.save);
+                        }}
                     }});
                     
-                    const stationAvgs = Object.entries(stationRates).map(([station, rates]) => ({{
-                        station: station,
-                        avgRate: rates.reduce((a, b) => a + b, 0) / rates.length,
-                        minRate: Math.min(...rates),
-                        msgTypes: rates.length
-                    }})).sort((a, b) => a.avgRate - b.avgRate);
+                    const stationSummary = Object.entries(stationStats).map(([station, data]) => {{
+                        const rates = data.rates;
+                        return {{
+                            station: station,
+                            avgRate: rates.reduce((a, b) => a + b, 0) / rates.length,
+                            maxRate: Math.max(...rates),
+                            minRate: Math.min(...rates),
+                            msgTypeCount: data.msgTypes.size,
+                            configCount: data.units.size * data.saves.size
+                        }};
+                    }}).sort((a, b) => b.maxRate - a.maxRate);
                     
-                    Plotly.newPlot('stationRates', [{{
-                        x: stationAvgs.map(d => d.station),
-                        y: stationAvgs.map(d => d.avgRate),
+                    Plotly.newPlot('stationRateSummary', [{{
+                        x: stationSummary.map(d => d.station),
+                        y: stationSummary.map(d => d.maxRate),
+                        name: 'Max Rate',
                         type: 'bar',
-                        marker: {{ color: '#9b59b6' }},
-                        text: stationAvgs.map(d => `${{d.msgTypes}} msg types`),
-                        hovertemplate: '%{{x}}<br>Avg: %{{y:.3f}}ms<br>%{{text}}<extra></extra>'
+                        marker: {{ color: '#e74c3c' }}
+                    }}, {{
+                        x: stationSummary.map(d => d.station),
+                        y: stationSummary.map(d => d.avgRate),
+                        name: 'Avg Rate',
+                        type: 'scatter',
+                        mode: 'lines+markers',
+                        line: {{ color: '#3498db', width: 3 }},
+                        marker: {{ size: 8 }}
                     }}], {{
                         margin: {{ t: 10, b: 60, l: 60, r: 20 }},
                         xaxis: {{ title: 'Station' }},
-                        yaxis: {{ title: 'Avg Message Rate (ms)' }}
+                        yaxis: {{ title: 'Messages per Second', type: 'log' }},
+                        barmode: 'group'
                     }});
                 }}
                 
-                // Station-Save combinations
+                // High-frequency Station-Save combinations
                 if (filteredMessageRatesByLocation.length > 0) {{
-                    const comboRates = {{}};
+                    const comboStats = {{}};
+                    
+                    // Group by station-save and message type
                     filteredMessageRatesByLocation.forEach(d => {{
                         const key = `${{d.station}}-${{d.save}}`;
-                        if (!comboRates[key]) {{
-                            comboRates[key] = [];
+                        if (!comboStats[key]) {{
+                            comboStats[key] = {{}};
                         }}
-                        comboRates[key].push(d.avg_time_diff_ms);
+                        if (!comboStats[key][d.msg_type]) {{
+                            comboStats[key][d.msg_type] = [];
+                        }}
+                        if (d.msg_per_sec) {{
+                            comboStats[key][d.msg_type].push(d.msg_per_sec);
+                        }}
                     }});
                     
-                    const comboAvgs = Object.entries(comboRates).map(([combo, rates]) => ({{
-                        combo: combo,
-                        avgRate: rates.reduce((a, b) => a + b, 0) / rates.length,
-                        minRate: Math.min(...rates),
-                        msgTypes: rates.length
-                    }})).sort((a, b) => a.avgRate - b.avgRate).slice(0, 20);
+                    // Calculate aggregated stats
+                    const comboSummary = [];
+                    Object.entries(comboStats).forEach(([combo, msgTypes]) => {{
+                        Object.entries(msgTypes).forEach(([msgType, rates]) => {{
+                            if (rates.length > 0) {{
+                                comboSummary.push({{
+                                    combo: combo,
+                                    msgType: msgType,
+                                    avgRate: rates.reduce((a, b) => a + b, 0) / rates.length,
+                                    maxRate: Math.max(...rates),
+                                    minRate: Math.min(...rates),
+                                    count: rates.length
+                                }});
+                            }}
+                        }});
+                    }});
                     
-                    Plotly.newPlot('stationSaveRates', [{{
-                        x: comboAvgs.map(d => d.combo),
-                        y: comboAvgs.map(d => d.avgRate),
+                    // Get top 20 highest frequency combinations
+                    const topHighFreq = comboSummary
+                        .sort((a, b) => b.maxRate - a.maxRate)
+                        .slice(0, 20);
+                    
+                    Plotly.newPlot('stationSaveHighFreq', [{{
+                        x: topHighFreq.map(d => `${{d.combo}} [${{d.msgType}}]`),
+                        y: topHighFreq.map(d => d.maxRate),
                         type: 'bar',
                         marker: {{
-                            color: comboAvgs.map(d => 
-                                d.avgRate < 1 ? '#e74c3c' : 
-                                d.avgRate < 10 ? '#f39c12' : '#27ae60'
+                            color: topHighFreq.map(d => 
+                                d.maxRate > 1000 ? '#e74c3c' : 
+                                d.maxRate > 100 ? '#f39c12' : '#27ae60'
                             )
                         }},
-                        text: comboAvgs.map(d => `${{d.msgTypes}} types, Min: ${{d.minRate.toFixed(3)}}ms`),
-                        hovertemplate: '%{{x}}<br>Avg: %{{y:.3f}}ms<br>%{{text}}<extra></extra>'
+                        text: topHighFreq.map(d => `Max: ${{d.maxRate.toFixed(1)}} msg/s`),
+                        hovertemplate: '%{{x}}<br>Max Rate: %{{y:.1f}} msg/s<br>%{{text}}<extra></extra>'
                     }}], {{
-                        margin: {{ t: 10, b: 100, l: 60, r: 20 }},
-                        xaxis: {{ title: 'Station-Save Combination', tickangle: -45 }},
-                        yaxis: {{ title: 'Avg Message Rate (ms)', type: 'log' }}
+                        margin: {{ t: 10, b: 120, l: 60, r: 20 }},
+                        xaxis: {{ title: 'Station-Save [Message Type]', tickangle: -45 }},
+                        yaxis: {{ title: 'Max Messages per Second', type: 'log' }}
                     }});
                 }}
                 
                 // Rate metrics
                 if (filteredMessageRatesByLocation.length > 0) {{
-                    const allRates = filteredMessageRatesByLocation.map(d => d.avg_time_diff_ms);
-                    const criticalCount = allRates.filter(r => r < 1).length;
-                    const warningCount = allRates.filter(r => r >= 1 && r < 10).length;
-                    
-                    const metricsHtml = `
-                        <div class="metric-card">
-                            <div class="metric-title">Total Configurations</div>
-                            <div class="metric-value">${{filteredMessageRatesByLocation.length}}</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-title">Critical Rate (&lt;1ms)</div>
-                            <div class="metric-value" style="color: #e74c3c;">${{criticalCount}}</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-title">Warning Rate (1-10ms)</div>
-                            <div class="metric-value" style="color: #f39c12;">${{warningCount}}</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-title">Fastest Rate</div>
-                            <div class="metric-value">${{Math.min(...allRates).toFixed(3)}}ms</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-title">Median Rate</div>
-                            <div class="metric-value">${{allRates.sort((a,b) => a-b)[Math.floor(allRates.length/2)].toFixed(3)}}ms</div>
-                        </div>
-                        <div class="metric-card">
-                            <div class="metric-title">Unique Message Types</div>
-                            <div class="metric-value">${{[...new Set(filteredMessageRatesByLocation.map(d => d.msg_type))].length}}</div>
-                        </div>
-                    `;
-                    document.getElementById('rateMetrics').innerHTML = metricsHtml;
+                    const allRates = filteredMessageRatesByLocation
+                        .filter(d => d.msg_per_sec)
+                        .map(d => d.msg_per_sec);
+                        
+                    if (allRates.length > 0) {{
+                        const criticalCount = allRates.filter(r => r > 1000).length;
+                        const warningCount = allRates.filter(r => r > 100 && r <= 1000).length;
+                        const normalCount = allRates.filter(r => r <= 100).length;
+                        
+                        const metricsHtml = `
+                            <div class="metric-card">
+                                <div class="metric-title">Total Configurations</div>
+                                <div class="metric-value">${{filteredMessageRatesByLocation.length}}</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-title">Critical Rate (>1000 msg/s)</div>
+                                <div class="metric-value" style="color: #e74c3c;">${{criticalCount}}</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-title">Warning Rate (100-1000 msg/s)</div>
+                                <div class="metric-value" style="color: #f39c12;">${{warningCount}}</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-title">Normal Rate (<100 msg/s)</div>
+                                <div class="metric-value" style="color: #27ae60;">${{normalCount}}</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-title">Highest Rate</div>
+                                <div class="metric-value">${{Math.max(...allRates).toFixed(1)}} msg/s</div>
+                            </div>
+                            <div class="metric-card">
+                                <div class="metric-title">Median Rate</div>
+                                <div class="metric-value">${{allRates.sort((a,b) => a-b)[Math.floor(allRates.length/2)].toFixed(1)}} msg/s</div>
+                            </div>
+                        `;
+                        document.getElementById('rateMetrics').innerHTML = metricsHtml;
+                    }}
                 }}
             }}
             
@@ -3054,19 +3205,19 @@ class StreamlinedBusMonitorDashboard:
                     yaxis: {{ title: 'Total Bus Flips' }}
                 }});
                 
-                // Test case statistics
+                // Test case statistics - Fixed to count unique message types per test case
                 const testCaseStats = {{}};
                 filteredTestFlips.forEach(tc => {{
                     if (!testCaseStats[tc.test_case_id]) {{
                         testCaseStats[tc.test_case_id] = {{
                             locations: new Set(),
                             totalFlips: 0,
-                            msgTypes: new Set(),
-                            dataWords: new Set()
+                            msgTypes: new Set()
                         }};
                     }}
                     testCaseStats[tc.test_case_id].locations.add(`${{tc.unit_id}}-${{tc.station}}-${{tc.save}}`);
                     testCaseStats[tc.test_case_id].totalFlips += tc.total_bus_flips;
+                    // Only add message types from this specific test case instance
                     if (tc.msg_types_list) {{
                         tc.msg_types_list.split(', ').forEach(mt => testCaseStats[tc.test_case_id].msgTypes.add(mt));
                     }}
@@ -3087,8 +3238,8 @@ class StreamlinedBusMonitorDashboard:
                     marker: {{ color: '#e74c3c' }}
                 }}, {{
                     x: statsData.map(d => d.testCase),
-                    y: statsData.map(d => d.msgTypes * 10), // Scale for visibility
-                    name: 'Unique Msg Types (x10)',
+                    y: statsData.map(d => d.msgTypes),
+                    name: 'Unique Message Types',
                     type: 'scatter',
                     mode: 'lines+markers',
                     yaxis: 'y2',
@@ -3099,7 +3250,7 @@ class StreamlinedBusMonitorDashboard:
                     xaxis: {{ title: 'Test Case ID', tickangle: -45 }},
                     yaxis: {{ title: 'Total Flips' }},
                     yaxis2: {{
-                        title: 'Scaled Values',
+                        title: 'Unique Message Types',
                         overlaying: 'y',
                         side: 'right'
                     }}
@@ -3142,8 +3293,17 @@ class StreamlinedBusMonitorDashboard:
                     reqSummary[r.requirement_name].flipCount += r.flip_count;
                     reqSummary[r.requirement_name].msgTypes.add(r.msg_type_affected);
                     reqSummary[r.requirement_name].locations.add(`${{r.unit_id}}/${{r.station}}/${{r.save}}`);
-                    if (r.test_case_ids && r.test_case_ids !== 'N/A') {{
-                        r.test_case_ids.split(', ').forEach(tc => reqSummary[r.requirement_name].testCases.add(tc));
+                    
+                    // Fixed test case ID extraction
+                    if (r.test_case_ids && r.test_case_ids !== 'N/A' && r.test_case_ids !== '') {{
+                        // Handle both comma-separated and other formats
+                        const tcIds = r.test_case_ids.toString().split(/[,;\\s]+/);
+                        tcIds.forEach(tc => {{
+                            const trimmed = tc.trim();
+                            if (trimmed && trimmed !== 'N/A') {{
+                                reqSummary[r.requirement_name].testCases.add(trimmed);
+                            }}
+                        }});
                     }}
                 }});
                 
@@ -3178,8 +3338,8 @@ class StreamlinedBusMonitorDashboard:
                     row.insertCell(1).textContent = `${{r.unit_id}}/${{r.station}}/${{r.save}}`;
                     row.insertCell(2).textContent = r.msg_type_affected || '';
                     row.insertCell(3).textContent = r.flip_count || 0;
-                    row.insertCell(4).textContent = r.test_cases_affected || 'N/A';
-                    row.insertCell(5).textContent = r.test_case_ids || 'N/A';
+                    row.insertCell(4).textContent = r.test_cases_affected || '0';
+                    row.insertCell(5).textContent = r.test_case_ids || 'None';
                 }});
             }}
             
