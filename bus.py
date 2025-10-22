@@ -1843,1759 +1843,1834 @@ class StreamlinedBusMonitorDashboard:
         return excel_path
 
 def create_interactive_dashboard(self):
-        """Create an enhanced interactive HTML dashboard with comprehensive filters and analytics"""
-        import json
-        from datetime import datetime
+    """Create an enhanced interactive HTML dashboard with comprehensive filters and analytics"""
+    import json
+    from datetime import datetime
+    
+    dashboard_path = self.output_folder / "dashboard.html"
+    
+    # Prepare data for JavaScript
+    flips_data = []
+    if self.df_flips is not None and not self.df_flips.empty:
+        df_temp = self.df_flips.copy()
+        for col in ['timestamp_busA', 'timestamp_busB']:
+            if col in df_temp.columns:
+                df_temp[col] = df_temp[col].astype(str)
+        flips_data = df_temp.to_dict('records')
+    
+    # Prepare test case data
+    test_case_data = []
+    if self.df_test_cases is not None and not self.df_test_cases.empty:
+        df_tc_temp = self.df_test_cases.copy()
+        for col in ['timestamp_start', 'timestamp_end']:
+            if col in df_tc_temp.columns:
+                df_tc_temp[col] = df_tc_temp[col].astype(str)
+        test_case_data = df_tc_temp.to_dict('records')
+    
+    # Prepare test case bus flips data
+    test_case_flip_data = []
+    if self.df_test_case_bus_flips is not None and not self.df_test_case_bus_flips.empty:
+        test_case_flip_data = self.df_test_case_bus_flips.to_dict('records')
+    
+    # Prepare message rates data
+    message_rates_data = []
+    if hasattr(self, 'df_message_rates_summary') and self.df_message_rates_summary is not None:
+        df_rates_temp = self.df_message_rates_summary.copy()
+        # Convert milliseconds to messages per second
+        for col in ['avg_time_diff_ms', 'min_time_diff_ms', 'max_time_diff_ms', 'median_time_diff_ms']:
+            if col in df_rates_temp.columns:
+                df_rates_temp[f'{col.replace("_time_diff_ms", "_rate")}'] = 1000 / df_rates_temp[col]
+        message_rates_data = df_rates_temp.to_dict('records')
+    
+    # Prepare message rates by location
+    message_rates_by_location = []
+    if self.df_message_rates is not None and not self.df_message_rates.empty:
+        df_loc_temp = self.df_message_rates.copy()
+        # Add rate calculations
+        df_loc_temp['msg_per_sec'] = 1000 / df_loc_temp['avg_time_diff_ms']
+        df_loc_temp['min_rate'] = 1000 / df_loc_temp['max_time_diff_ms']
+        df_loc_temp['max_rate'] = 1000 / df_loc_temp['min_time_diff_ms']
+        message_rates_by_location = df_loc_temp.to_dict('records')
+    
+    # Prepare failed requirements data
+    failed_requirements_data = []
+    if hasattr(self, 'df_failed_requirements_analysis') and self.df_failed_requirements_analysis is not None:
+        failed_requirements_data = self.df_failed_requirements_analysis.to_dict('records')
+    
+    # Prepare requirements at risk data
+    requirements_at_risk_data = []
+    if self.df_requirements_at_risk is not None and not self.df_requirements_at_risk.empty:
+        df_req_temp = self.df_requirements_at_risk.copy()
+        if 'test_cases_affected' in df_req_temp.columns:
+            df_req_temp['test_cases_affected'] = df_req_temp['test_cases_affected'].astype(str)
+        requirements_at_risk_data = df_req_temp.to_dict('records')
+    
+    # Get unique values for filters
+    unit_ids = sorted(self.df_flips['unit_id'].unique().tolist()) if self.df_flips is not None else []
+    stations = sorted(self.df_flips['station'].unique().tolist()) if self.df_flips is not None else []
+    saves = sorted(self.df_flips['save'].unique().tolist()) if self.df_flips is not None else []
+    msg_types = sorted(self.df_flips['msg_type'].dropna().unique().tolist()) if self.df_flips is not None else []
+    
+    # Get test case IDs for filter
+    test_case_ids = []
+    if self.df_test_cases is not None and not self.df_test_cases.empty:
+        test_case_ids = sorted(self.df_test_cases['test_case_id'].unique().tolist())
+    
+    # Calculate summary stats
+    total_flips = len(self.df_flips) if self.df_flips is not None else 0
+    total_flips_no_changes = len(self.df_flips_no_changes) if self.df_flips_no_changes is not None else 0
+    total_units = len(unit_ids)
+    total_stations = len(stations)
+    total_saves = len(saves)
+    
+    # Calculate flip percentage
+    flip_percentage = 0
+    if self.total_messages_processed > 0:
+        flip_percentage = (total_flips / self.total_messages_processed) * 100
+    
+    # Prepare data word analysis
+    data_word_data = []
+    if self.df_data_word_analysis is not None and not self.df_data_word_analysis.empty:
+        data_word_data = self.df_data_word_analysis.head(50).to_dict('records')
+    
+    # Convert to JSON
+    flips_data_json = json.dumps(flips_data)
+    test_case_data_json = json.dumps(test_case_data)
+    test_case_flip_data_json = json.dumps(test_case_flip_data)
+    message_rates_data_json = json.dumps(message_rates_data)
+    message_rates_by_location_json = json.dumps(message_rates_by_location)
+    failed_requirements_data_json = json.dumps(failed_requirements_data)
+    requirements_at_risk_data_json = json.dumps(requirements_at_risk_data)
+    data_word_data_json = json.dumps(data_word_data)
+    unit_ids_json = json.dumps(unit_ids)
+    stations_json = json.dumps(stations)
+    saves_json = json.dumps(saves)
+    msg_types_json = json.dumps(msg_types)
+    test_case_ids_json = json.dumps(test_case_ids)
+    
+    html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Enhanced Bus Monitor Dashboard</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body {{
+            font-family: 'Segoe UI', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        }}
+        .container {{
+            max-width: 1800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        }}
+        h1 {{
+            color: #2c3e50;
+            border-bottom: 4px solid #3498db;
+            padding-bottom: 15px;
+            font-size: 32px;
+        }}
+        .filters {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin: 30px 0;
+            padding: 25px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 12px;
+            box-shadow: 0 3px 15px rgba(0,0,0,0.2);
+        }}
+        .filter-group {{
+            display: flex;
+            flex-direction: column;
+        }}
+        .filter-group label {{
+            font-weight: 600;
+            margin-bottom: 6px;
+            color: white;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        .filter-group select {{
+            padding: 10px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 6px;
+            background: rgba(255,255,255,0.95);
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }}
+        .filter-group select:hover {{
+            border-color: rgba(255,255,255,0.6);
+            transform: translateY(-1px);
+        }}
+        .stats-row {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 15px;
+            margin: 30px 0;
+        }}
+        .stat-card {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            transition: transform 0.3s ease;
+            cursor: pointer;
+        }}
+        .stat-card:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.3);
+        }}
+        .stat-card.warning {{
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        }}
+        .stat-card.info {{
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+        }}
+        .stat-card.success {{
+            background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+        }}
+        .stat-value {{
+            font-size: 28px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }}
+        .stat-label {{
+            opacity: 0.95;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        .chart-container {{
+            margin: 30px 0;
+            padding: 25px;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 3px 15px rgba(0,0,0,0.1);
+            border: 1px solid #e1e8ed;
+        }}
+        .chart-title {{
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: #2c3e50;
+            border-left: 4px solid #3498db;
+            padding-left: 12px;
+        }}
+        #filteredCount {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            display: inline-block;
+            margin: 20px 0;
+            font-weight: 600;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }}
+        .reset-btn {{
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            margin-left: 10px;
+            transition: all 0.3s ease;
+        }}
+        .reset-btn:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }}
+        .info-box {{
+            margin-bottom: 15px;
+            padding: 15px;
+            background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+            border-left: 4px solid #2196F3;
+            border-radius: 6px;
+        }}
+        .data-table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }}
+        .data-table th {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px;
+            text-align: left;
+            cursor: pointer;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        .data-table td {{
+            padding: 10px;
+            border-bottom: 1px solid #e1e8ed;
+        }}
+        .data-table tr:hover {{
+            background: #f8f9fa;
+        }}
+        .tab-container {{
+            margin-top: 30px;
+        }}
+        .tab-buttons {{
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e1e8ed;
+            flex-wrap: wrap;
+        }}
+        .tab-button {{
+            padding: 12px 24px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            color: #7f8c8d;
+            transition: all 0.3s ease;
+            border-bottom: 3px solid transparent;
+            margin-bottom: -2px;
+        }}
+        .tab-button.active {{
+            color: #3498db;
+            border-bottom-color: #3498db;
+        }}
+        .tab-content {{
+            display: none;
+        }}
+        .tab-content.active {{
+            display: block;
+        }}
+        .metric-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }}
+        .metric-card {{
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #3498db;
+        }}
+        .metric-title {{
+            font-size: 14px;
+            color: #7f8c8d;
+            margin-bottom: 5px;
+        }}
+        .metric-value {{
+            font-size: 24px;
+            font-weight: bold;
+            color: #2c3e50;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚌 Enhanced Bus Monitor Dashboard</h1>
         
-        dashboard_path = self.output_folder / "dashboard.html"
+        <!-- Dynamic Stats Row -->
+        <div id="statsRow" class="stats-row">
+            <!-- Will be populated dynamically -->
+        </div>
         
-        # Prepare data for JavaScript
-        flips_data = []
-        if self.df_flips is not None and not self.df_flips.empty:
-            df_temp = self.df_flips.copy()
-            for col in ['timestamp_busA', 'timestamp_busB']:
-                if col in df_temp.columns:
-                    df_temp[col] = df_temp[col].astype(str)
-            flips_data = df_temp.to_dict('records')
+        <!-- Enhanced Filters -->
+        <div class="filters">
+            <div class="filter-group">
+                <label for="globalUnitFilter">Unit ID:</label>
+                <select id="globalUnitFilter" onchange="updateAllCharts()">
+                    <option value="">All Units</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="globalStationFilter">Station:</label>
+                <select id="globalStationFilter" onchange="updateAllCharts()">
+                    <option value="">All Stations</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="globalSaveFilter">Save:</label>
+                <select id="globalSaveFilter" onchange="updateAllCharts()">
+                    <option value="">All Saves</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="globalMsgTypeFilter">Message Type:</label>
+                <select id="globalMsgTypeFilter" onchange="updateAllCharts()">
+                    <option value="">All Message Types</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="globalTestCaseFilter">Test Case:</label>
+                <select id="globalTestCaseFilter" onchange="updateAllCharts()">
+                    <option value="">All Test Cases</option>
+                </select>
+            </div>
+        </div>
         
-        # Prepare test case data
-        test_case_data = []
-        if self.df_test_cases is not None and not self.df_test_cases.empty:
-            df_tc_temp = self.df_test_cases.copy()
-            for col in ['timestamp_start', 'timestamp_end']:
-                if col in df_tc_temp.columns:
-                    df_tc_temp[col] = df_tc_temp[col].astype(str)
-            test_case_data = df_tc_temp.to_dict('records')
+        <div>
+            <span id="filteredCount">Loading...</span>
+            <button class="reset-btn" onclick="resetAllFilters()">🔄 Reset All Filters</button>
+        </div>
         
-        # Prepare test case bus flips data
-        test_case_flip_data = []
-        if self.df_test_case_bus_flips is not None and not self.df_test_case_bus_flips.empty:
-            test_case_flip_data = self.df_test_case_bus_flips.to_dict('records')
-        
-        # Prepare message rates data - convert to messages/second properly
-        message_rates_data = []
-        if hasattr(self, 'df_message_rates_summary') and self.df_message_rates_summary is not None:
-            df_rates_temp = self.df_message_rates_summary.copy()
-            # Convert milliseconds to messages per second (1000/ms = msgs/sec)
-            for col in ['avg_time_diff_ms', 'min_time_diff_ms', 'max_time_diff_ms', 'median_time_diff_ms']:
-                if col in df_rates_temp.columns:
-                    df_rates_temp[f'{col.replace("_time_diff_ms", "_rate")}'] = 1000 / df_rates_temp[col]
-            message_rates_data = df_rates_temp.to_dict('records')
-        
-        # Prepare message rates by location with proper conversion
-        message_rates_by_location = []
-        if self.df_message_rates is not None and not self.df_message_rates.empty:
-            df_loc_temp = self.df_message_rates.copy()
-            # Add rate calculations
-            df_loc_temp['msg_per_sec'] = 1000 / df_loc_temp['avg_time_diff_ms']
-            df_loc_temp['min_rate'] = 1000 / df_loc_temp['max_time_diff_ms']  # min rate = 1000/max time
-            df_loc_temp['max_rate'] = 1000 / df_loc_temp['min_time_diff_ms']  # max rate = 1000/min time
-            message_rates_by_location = df_loc_temp.to_dict('records')
-        
-        # Prepare failed requirements data
-        failed_requirements_data = []
-        if hasattr(self, 'df_failed_requirements_analysis') and self.df_failed_requirements_analysis is not None:
-            failed_requirements_data = self.df_failed_requirements_analysis.to_dict('records')
-        
-        # Prepare requirements at risk data with proper test case info
-        requirements_at_risk_data = []
-        if self.df_requirements_at_risk is not None and not self.df_requirements_at_risk.empty:
-            df_req_temp = self.df_requirements_at_risk.copy()
-            # Ensure test_cases_affected is a string
-            if 'test_cases_affected' in df_req_temp.columns:
-                df_req_temp['test_cases_affected'] = df_req_temp['test_cases_affected'].astype(str)
-            requirements_at_risk_data = df_req_temp.to_dict('records')
-        
-        # Get unique values for filters
-        unit_ids = sorted(self.df_flips['unit_id'].unique().tolist()) if self.df_flips is not None else []
-        stations = sorted(self.df_flips['station'].unique().tolist()) if self.df_flips is not None else []
-        saves = sorted(self.df_flips['save'].unique().tolist()) if self.df_flips is not None else []
-        msg_types = sorted(self.df_flips['msg_type'].dropna().unique().tolist()) if self.df_flips is not None else []
-        
-        # Get test case IDs for filter
-        test_case_ids = []
-        if self.df_test_cases is not None and not self.df_test_cases.empty:
-            test_case_ids = sorted(self.df_test_cases['test_case_id'].unique().tolist())
-        
-        # Calculate summary stats
-        total_flips = len(self.df_flips) if self.df_flips is not None else 0
-        total_flips_no_changes = len(self.df_flips_no_changes) if self.df_flips_no_changes is not None else 0
-        total_units = len(unit_ids)
-        total_stations = len(stations)
-        total_saves = len(saves)
-        
-        # Calculate flip percentage
-        flip_percentage = 0
-        if self.total_messages_processed > 0:
-            flip_percentage = (total_flips / self.total_messages_processed) * 100
-        
-        # Prepare data word analysis for dashboard (simplified)
-        data_word_data = []
-        if self.df_data_word_analysis is not None and not self.df_data_word_analysis.empty:
-            data_word_data = self.df_data_word_analysis.head(50).to_dict('records')
-        
-        # Convert to JSON for JavaScript
-        flips_data_json = json.dumps(flips_data)
-        test_case_data_json = json.dumps(test_case_data)
-        test_case_flip_data_json = json.dumps(test_case_flip_data)
-        message_rates_data_json = json.dumps(message_rates_data)
-        message_rates_by_location_json = json.dumps(message_rates_by_location)
-        failed_requirements_data_json = json.dumps(failed_requirements_data)
-        requirements_at_risk_data_json = json.dumps(requirements_at_risk_data)
-        data_word_data_json = json.dumps(data_word_data)
-        unit_ids_json = json.dumps(unit_ids)
-        stations_json = json.dumps(stations)
-        saves_json = json.dumps(saves)
-        msg_types_json = json.dumps(msg_types)
-        test_case_ids_json = json.dumps(test_case_ids)
-        
-        html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Enhanced Bus Monitor Dashboard</title>
-        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-        <style>
-            body {{
-                font-family: 'Segoe UI', Arial, sans-serif;
-                margin: 0;
-                padding: 20px;
-                background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-            }}
-            .container {{
-                max-width: 1800px;
-                margin: 0 auto;
-                background: white;
-                border-radius: 15px;
-                padding: 30px;
-                box-shadow: 0 4px 20px rgba(0,0,0,0.15);
-            }}
-            h1 {{
-                color: #2c3e50;
-                border-bottom: 4px solid #3498db;
-                padding-bottom: 15px;
-                font-size: 32px;
-            }}
-            .filters {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                gap: 15px;
-                margin: 30px 0;
-                padding: 25px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                border-radius: 12px;
-                box-shadow: 0 3px 15px rgba(0,0,0,0.2);
-            }}
-            .filter-group {{
-                display: flex;
-                flex-direction: column;
-            }}
-            .filter-group label {{
-                font-weight: 600;
-                margin-bottom: 6px;
-                color: white;
-                font-size: 14px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }}
-            .filter-group select {{
-                padding: 10px;
-                border: 2px solid rgba(255,255,255,0.3);
-                border-radius: 6px;
-                background: rgba(255,255,255,0.95);
-                font-size: 14px;
-                transition: all 0.3s ease;
-            }}
-            .filter-group select:hover {{
-                border-color: rgba(255,255,255,0.6);
-                transform: translateY(-1px);
-            }}
-            .stats-row {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-                gap: 15px;
-                margin: 30px 0;
-            }}
-            .stat-card {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 20px;
-                border-radius: 10px;
-                text-align: center;
-                transition: transform 0.3s ease;
-                cursor: pointer;
-            }}
-            .stat-card:hover {{
-                transform: translateY(-5px);
-                box-shadow: 0 5px 20px rgba(0,0,0,0.3);
-            }}
-            .stat-card.warning {{
-                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            }}
-            .stat-card.info {{
-                background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-            }}
-            .stat-card.success {{
-                background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
-            }}
-            .stat-value {{
-                font-size: 28px;
-                font-weight: bold;
-                margin-bottom: 5px;
-            }}
-            .stat-label {{
-                opacity: 0.95;
-                font-size: 13px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }}
-            .chart-container {{
-                margin: 30px 0;
-                padding: 25px;
-                background: white;
-                border-radius: 12px;
-                box-shadow: 0 3px 15px rgba(0,0,0,0.1);
-                border: 1px solid #e1e8ed;
-            }}
-            .chart-title {{
-                font-size: 20px;
-                font-weight: 600;
-                margin-bottom: 20px;
-                color: #2c3e50;
-                border-left: 4px solid #3498db;
-                padding-left: 12px;
-            }}
-            #filteredCount {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 12px 24px;
-                border-radius: 8px;
-                display: inline-block;
-                margin: 20px 0;
-                font-weight: 600;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-            }}
-            .reset-btn {{
-                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-                color: white;
-                border: none;
-                padding: 12px 24px;
-                border-radius: 8px;
-                cursor: pointer;
-                font-size: 14px;
-                font-weight: 600;
-                margin-left: 10px;
-                transition: all 0.3s ease;
-            }}
-            .reset-btn:hover {{
-                transform: translateY(-2px);
-                box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-            }}
-            .info-box {{
-                margin-bottom: 15px;
-                padding: 15px;
-                background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
-                border-left: 4px solid #2196F3;
-                border-radius: 6px;
-            }}
-            .data-table {{
-                width: 100%;
-                border-collapse: collapse;
-                font-size: 13px;
-            }}
-            .data-table th {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 12px;
-                text-align: left;
-                cursor: pointer;
-                font-weight: 600;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }}
-            .data-table td {{
-                padding: 10px;
-                border-bottom: 1px solid #e1e8ed;
-            }}
-            .data-table tr:hover {{
-                background: #f8f9fa;
-            }}
-            .tab-container {{
-                margin-top: 30px;
-            }}
-            .tab-buttons {{
-                display: flex;
-                gap: 10px;
-                margin-bottom: 20px;
-                border-bottom: 2px solid #e1e8ed;
-                flex-wrap: wrap;
-            }}
-            .tab-button {{
-                padding: 12px 24px;
-                background: none;
-                border: none;
-                cursor: pointer;
-                font-size: 16px;
-                font-weight: 600;
-                color: #7f8c8d;
-                transition: all 0.3s ease;
-                border-bottom: 3px solid transparent;
-                margin-bottom: -2px;
-            }}
-            .tab-button.active {{
-                color: #3498db;
-                border-bottom-color: #3498db;
-            }}
-            .tab-content {{
-                display: none;
-            }}
-            .tab-content.active {{
-                display: block;
-            }}
-            .metric-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 20px;
-                margin: 20px 0;
-            }}
-            .metric-card {{
-                padding: 20px;
-                background: #f8f9fa;
-                border-radius: 8px;
-                border-left: 4px solid #3498db;
-            }}
-            .metric-title {{
-                font-size: 14px;
-                color: #7f8c8d;
-                margin-bottom: 5px;
-            }}
-            .metric-value {{
-                font-size: 24px;
-                font-weight: bold;
-                color: #2c3e50;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🚌 Enhanced Bus Monitor Dashboard</h1>
-            
-            <!-- Dynamic Stats Row -->
-            <div id="statsRow" class="stats-row">
-                <!-- Will be populated dynamically -->
+        <!-- Tab Navigation -->
+        <div class="tab-container">
+            <div class="tab-buttons">
+                <button class="tab-button active" onclick="switchTab('overview')">Overview</button>
+                <button class="tab-button" onclick="switchTab('timeline')">Timeline</button>
+                <button class="tab-button" onclick="switchTab('rates')">Message Rates</button>
+                <button class="tab-button" onclick="switchTab('testcases')">Test Cases</button>
+                <button class="tab-button" onclick="switchTab('requirements')">Requirements</button>
+                <button class="tab-button" onclick="switchTab('datawords')">Data Words</button>
             </div>
             
-            <!-- Enhanced Filters -->
-            <div class="filters">
-                <div class="filter-group">
-                    <label for="globalUnitFilter">Unit ID:</label>
-                    <select id="globalUnitFilter" onchange="updateAllCharts()">
-                        <option value="">All Units</option>
-                    </select>
+            <!-- Overview Tab -->
+            <div id="overview-tab" class="tab-content active">
+                <div class="chart-container">
+                    <div class="chart-title">Bus Flips by Unit ID</div>
+                    <div id="unitChart"></div>
                 </div>
-                <div class="filter-group">
-                    <label for="globalStationFilter">Station:</label>
-                    <select id="globalStationFilter" onchange="updateAllCharts()">
-                        <option value="">All Stations</option>
-                    </select>
+                
+                <div class="chart-container">
+                    <div class="chart-title">Bus Flips by Station</div>
+                    <div id="stationChart"></div>
                 </div>
-                <div class="filter-group">
-                    <label for="globalSaveFilter">Save:</label>
-                    <select id="globalSaveFilter" onchange="updateAllCharts()">
-                        <option value="">All Saves</option>
-                    </select>
+                
+                <div class="chart-container">
+                    <div class="chart-title">Bus Flips by Save</div>
+                    <div id="saveChart"></div>
                 </div>
-                <div class="filter-group">
-                    <label for="globalMsgTypeFilter">Message Type:</label>
-                    <select id="globalMsgTypeFilter" onchange="updateAllCharts()">
-                        <option value="">All Message Types</option>
-                    </select>
+                
+                <div class="chart-container">
+                    <div class="chart-title">Top 20 Message Types with Bus Flips</div>
+                    <div id="msgTypeChart"></div>
                 </div>
-                <div class="filter-group">
-                    <label for="globalTestCaseFilter">Test Case:</label>
-                    <select id="globalTestCaseFilter" onchange="updateAllCharts()">
-                        <option value="">All Test Cases</option>
-                    </select>
+                
+                <div class="chart-container">
+                    <div class="chart-title">R vs T Message Distribution</div>
+                    <div id="rtChart"></div>
                 </div>
             </div>
             
-            <div>
-                <span id="filteredCount">Loading...</span>
-                <button class="reset-btn" onclick="resetAllFilters()">🔄 Reset All Filters</button>
+            <!-- Timeline Tab -->
+            <div id="timeline-tab" class="tab-content">
+                <div class="chart-container">
+                    <div class="chart-title">Bus Flips Over Time</div>
+                    <div class="info-box">
+                        <strong>Timeline Analysis:</strong> Shows the distribution of bus flips over time. 
+                        Look for unusual spikes or patterns that might indicate specific issues.
+                    </div>
+                    <div id="timelineChart"></div>
+                </div>
+                
+                <div class="chart-container">
+                    <div class="chart-title">Test Case Execution Summary (Grouped)</div>
+                    <div class="info-box">
+                        <strong>Test Case Summary:</strong> Shows aggregated test cases with time ranges and bus flip counts.
+                        Test cases are grouped by their base name (e.g., QS_2000_01 and QS_2000_02 are grouped as QS_2000).
+                    </div>
+                    <div id="testCaseSummaryTable"></div>
+                </div>
+                
+                <div class="chart-container">
+                    <div class="chart-title">Hourly Bus Flip Distribution</div>
+                    <div id="hourlyChart"></div>
+                </div>
+                
+                <div class="chart-container">
+                    <div class="chart-title">Bus Flip Spike Analysis</div>
+                    <div class="info-box">
+                        <strong>Spike Details:</strong> Shows peak periods with message types and test cases running during those times.
+                    </div>
+                    <div id="spikeAnalysis"></div>
+                </div>
             </div>
             
-            <!-- Tab Navigation -->
-            <div class="tab-container">
-                <div class="tab-buttons">
-                    <button class="tab-button active" onclick="switchTab('overview')">Overview</button>
-                    <button class="tab-button" onclick="switchTab('timeline')">Timeline</button>
-                    <button class="tab-button" onclick="switchTab('rates')">Message Rates</button>
-                    <button class="tab-button" onclick="switchTab('testcases')">Test Cases</button>
-                    <button class="tab-button" onclick="switchTab('requirements')">Requirements</button>
-                    <button class="tab-button" onclick="switchTab('datawords')">Data Words</button>
+            <!-- Message Rates Tab -->
+            <div id="rates-tab" class="tab-content">
+                <div class="chart-container">
+                    <div class="chart-title">Message Rate Statistics by Type</div>
+                    <div class="info-box">
+                        <strong>Message Rate Analysis:</strong> Shows sampling rates (time between messages) for each message type.
+                        Lower values indicate higher frequency. Critical: <1ms, Warning: <10ms.
+                    </div>
+                    <div id="messageRateStats"></div>
                 </div>
                 
-                <!-- Overview Tab -->
-                <div id="overview-tab" class="tab-content active">
-                    <div class="chart-container">
-                        <div class="chart-title">Bus Flips by Unit ID</div>
-                        <div id="unitChart"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Bus Flips by Station</div>
-                        <div id="stationChart"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Bus Flips by Save</div>
-                        <div id="saveChart"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Top 20 Message Types with Bus Flips</div>
-                        <div id="msgTypeChart"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">R vs T Message Distribution</div>
-                        <div id="rtChart"></div>
-                    </div>
+                <div class="chart-container">
+                    <div class="chart-title">Station Message Rate Summary</div>
+                    <div id="stationRateSummary"></div>
                 </div>
                 
-                <!-- Timeline Tab -->
-                <div id="timeline-tab" class="tab-content">
-                    <div class="chart-container">
-                        <div class="chart-title">Bus Flips Over Time</div>
-                        <div class="info-box">
-                            <strong>Timeline Analysis:</strong> Shows the distribution of bus flips over time. 
-                            Look for unusual spikes or patterns that might indicate specific issues.
-                        </div>
-                        <div id="timelineChart"></div>
+                <div class="chart-container">
+                    <div class="chart-title">High-Frequency Station-Save Combinations</div>
+                    <div class="info-box">
+                        <strong>Note:</strong> Rates are calculated per save, not aggregated across saves in a station.
                     </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Test Case Execution Summary</div>
-                        <div class="info-box">
-                            <strong>Test Case Summary:</strong> Shows test cases with their execution details and coverage.
-                            Sorted by duration and colored by bus flip presence.
-                        </div>
-                        <div id="testCaseSummaryTable"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Hourly Bus Flip Distribution</div>
-                        <div id="hourlyChart"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Bus Flip Spike Analysis</div>
-                        <div id="spikeAnalysis"></div>
-                    </div>
+                    <div id="stationSaveHighFreq"></div>
                 </div>
                 
-                <!-- Message Rates Tab -->
-                <div id="rates-tab" class="tab-content">
-                    <div class="chart-container">
-                        <div class="chart-title">Message Rate Statistics by Type</div>
-                        <div class="info-box">
-                            <strong>Message Rate Analysis:</strong> Shows messages per second for each message type.
-                            Higher rates indicate more frequent transmissions. Critical: >1000 msg/s, Warning: >100 msg/s.
-                        </div>
-                        <div id="messageRateStats"></div>
+                <div class="chart-container">
+                    <div class="chart-title">Message Rate Metrics</div>
+                    <div class="metric-grid" id="rateMetrics"></div>
+                </div>
+            </div>
+            
+            <!-- Test Cases Tab -->
+            <div id="testcases-tab" class="tab-content">
+                <div class="chart-container">
+                    <div class="chart-title">Test Cases with Most Bus Flips (Grouped)</div>
+                    <div class="info-box">
+                        <strong>Test Case Analysis:</strong> Shows grouped test cases with aggregated bus flip counts.
+                        Test cases are grouped by base name, handling both numbered variants and combined runs.
                     </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Station Message Rate Summary</div>
-                        <div id="stationRateSummary"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">High-Frequency Station-Save Combinations</div>
-                        <div id="stationSaveHighFreq"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Message Rate Metrics</div>
-                        <div class="metric-grid" id="rateMetrics"></div>
-                    </div>
+                    <div id="testCaseFlipCounts"></div>
                 </div>
                 
-                <!-- Test Cases Tab -->
-                <div id="testcases-tab" class="tab-content">
-                    <div class="chart-container">
-                        <div class="chart-title">Test Cases with Most Bus Flips</div>
-                        <div class="info-box">
-                            <strong>Test Case Analysis:</strong> Shows individual test cases and their bus flip counts.
-                        </div>
-                        <div id="testCaseFlipCounts"></div>
+                <div class="chart-container">
+                    <div class="chart-title">Bus Flip Distribution Across Test Cases</div>
+                    <div class="info-box">
+                        <strong>Distribution Analysis:</strong> Box plot showing the variation of bus flips within each test case group.
                     </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Test Case Statistics</div>
-                        <div id="testCaseStats"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Test Case Detail Table</div>
-                        <div style="overflow-x: auto;">
-                            <table id="testCaseTable" class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th onclick="sortTable('testCaseTable', 0)">Test Case ID</th>
-                                        <th onclick="sortTable('testCaseTable', 1)">Unit ID</th>
-                                        <th onclick="sortTable('testCaseTable', 2)">Station</th>
-                                        <th onclick="sortTable('testCaseTable', 3)">Save</th>
-                                        <th onclick="sortTable('testCaseTable', 4)">Bus Flips</th>
-                                        <th onclick="sortTable('testCaseTable', 5)">Unique Msg Types</th>
-                                        <th onclick="sortTable('testCaseTable', 6)">Most Common Type</th>
-                                        <th onclick="sortTable('testCaseTable', 7)">Duration (s)</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="testCaseTableBody"></tbody>
-                            </table>
-                        </div>
-                    </div>
+                    <div id="testCaseDistribution"></div>
                 </div>
                 
-                <!-- Requirements Tab -->
-                <div id="requirements-tab" class="tab-content">
-                    <div class="chart-container">
-                        <div class="chart-title">Requirements Affected by Bus Flips</div>
-                        <div class="info-box">
-                            <strong>Requirements Impact:</strong> Shows requirements and their associated bus flip counts,
-                            along with test case information.
-                        </div>
-                        <div id="requirementsChart"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Requirements Detail Table</div>
-                        <div style="overflow-x: auto;">
-                            <table id="requirementsTable" class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th onclick="sortTable('requirementsTable', 0)">Requirement</th>
-                                        <th onclick="sortTable('requirementsTable', 1)">Unit/Station/Save</th>
-                                        <th onclick="sortTable('requirementsTable', 2)">Message Type</th>
-                                        <th onclick="sortTable('requirementsTable', 3)">Flip Count</th>
-                                        <th onclick="sortTable('requirementsTable', 4)">Test Cases Affected</th>
-                                        <th onclick="sortTable('requirementsTable', 5)">Test Case IDs</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="requirementsTableBody"></tbody>
-                            </table>
-                        </div>
+                <div class="chart-container">
+                    <div class="chart-title">Test Case Detail Table</div>
+                    <div style="overflow-x: auto;">
+                        <table id="testCaseTable" class="data-table">
+                            <thead>
+                                <tr>
+                                    <th onclick="sortTable('testCaseTable', 0)">Test Case Group</th>
+                                    <th onclick="sortTable('testCaseTable', 1)">Total Bus Flips</th>
+                                    <th onclick="sortTable('testCaseTable', 2)">Runs</th>
+                                    <th onclick="sortTable('testCaseTable', 3)">Avg Flips/Run</th>
+                                    <th onclick="sortTable('testCaseTable', 4)">Unique Msg Types</th>
+                                    <th onclick="sortTable('testCaseTable', 5)">Locations</th>
+                                    <th onclick="sortTable('testCaseTable', 6)">Time Range</th>
+                                </tr>
+                            </thead>
+                            <tbody id="testCaseTableBody"></tbody>
+                        </table>
                     </div>
                 </div>
+            </div>
+            
+            <!-- Requirements Tab -->
+            <div id="requirements-tab" class="tab-content">
+                <div class="chart-container">
+                    <div class="chart-title">Requirements Affected by Bus Flips</div>
+                    <div class="info-box">
+                        <strong>Requirements Impact:</strong> Shows requirements and their associated bus flip counts,
+                        along with test case information.
+                    </div>
+                    <div id="requirementsChart"></div>
+                </div>
                 
-                <!-- Data Words Tab -->
-                <div id="datawords-tab" class="tab-content">
-                    <div class="chart-container">
-                        <div class="chart-title">Data Word Impact Analysis</div>
-                        <div class="info-box">
-                            <strong>Impact Matrix:</strong> Shows which data words are most problematic across message types.
-                            Bubble size indicates frequency, color indicates affected locations.
-                        </div>
-                        <div id="dataWordImpactMatrix"></div>
+                <div class="chart-container">
+                    <div class="chart-title">Requirements Detail Table</div>
+                    <div style="overflow-x: auto;">
+                        <table id="requirementsTable" class="data-table">
+                            <thead>
+                                <tr>
+                                    <th onclick="sortTable('requirementsTable', 0)">Requirement</th>
+                                    <th onclick="sortTable('requirementsTable', 1)">Unit/Station/Save</th>
+                                    <th onclick="sortTable('requirementsTable', 2)">Message Type</th>
+                                    <th onclick="sortTable('requirementsTable', 3)">Flip Count</th>
+                                    <th onclick="sortTable('requirementsTable', 4)">Test Cases Affected</th>
+                                    <th onclick="sortTable('requirementsTable', 5)">Test Case IDs</th>
+                                </tr>
+                            </thead>
+                            <tbody id="requirementsTableBody"></tbody>
+                        </table>
                     </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Error Pattern Analysis</div>
-                        <div class="info-box">
-                            <strong>Common Patterns:</strong> Shows the most frequent error patterns (before → after values).
-                            Helps identify systematic issues.
-                        </div>
-                        <div id="errorPatternChart"></div>
+                </div>
+            </div>
+            
+            <!-- Data Words Tab -->
+            <div id="datawords-tab" class="tab-content">
+                <div class="chart-container">
+                    <div class="chart-title">Error Pattern Analysis (Enhanced)</div>
+                    <div class="info-box">
+                        <strong>Common Patterns:</strong> Shows the most frequent error patterns with single/multi-word change indicators.
+                        Helps identify systematic issues and pattern types.
                     </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Data Word Statistics</div>
-                        <div class="metric-grid" id="dataWordMetrics"></div>
-                    </div>
-                    
-                    <div class="chart-container">
-                        <div class="chart-title">Detailed Data Word Analysis</div>
-                        <div style="overflow-x: auto;">
-                            <table id="dataWordTable" class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th onclick="sortTable('dataWordTable', 0)">Message Type</th>
-                                        <th onclick="sortTable('dataWordTable', 1)">Data Word</th>
-                                        <th onclick="sortTable('dataWordTable', 2)">Total Issues</th>
-                                        <th onclick="sortTable('dataWordTable', 3)">Single/Multi</th>
-                                        <th onclick="sortTable('dataWordTable', 4)">Common Pattern</th>
-                                        <th onclick="sortTable('dataWordTable', 5)">Avg Speed (ms)</th>
-                                        <th onclick="sortTable('dataWordTable', 6)">Locations</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="dataWordTableBody"></tbody>
-                            </table>
-                        </div>
+                    <div id="errorPatternChart"></div>
+                </div>
+                
+                <div class="chart-container">
+                    <div class="chart-title">Data Word Statistics</div>
+                    <div class="metric-grid" id="dataWordMetrics"></div>
+                </div>
+                
+                <div class="chart-container">
+                    <div class="chart-title">Detailed Data Word Analysis</div>
+                    <div style="overflow-x: auto;">
+                        <table id="dataWordTable" class="data-table">
+                            <thead>
+                                <tr>
+                                    <th onclick="sortTable('dataWordTable', 0)">Message Type</th>
+                                    <th onclick="sortTable('dataWordTable', 1)">Data Word</th>
+                                    <th onclick="sortTable('dataWordTable', 2)">Total Issues</th>
+                                    <th onclick="sortTable('dataWordTable', 3)">Single/Multi</th>
+                                    <th onclick="sortTable('dataWordTable', 4)">Common Pattern</th>
+                                    <th onclick="sortTable('dataWordTable', 5)">Avg Speed (ms)</th>
+                                    <th onclick="sortTable('dataWordTable', 6)">Locations</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dataWordTableBody"></tbody>
+                        </table>
                     </div>
                 </div>
             </div>
         </div>
+    </div>
+    
+    <script>
+        // Data from Python
+        const allFlipsData = {flips_data_json};
+        const testCaseData = {test_case_data_json};
+        const testCaseFlipData = {test_case_flip_data_json};
+        const messageRatesData = {message_rates_data_json};
+        const messageRatesByLocation = {message_rates_by_location_json};
+        const failedRequirementsData = {failed_requirements_data_json};
+        const requirementsAtRiskData = {requirements_at_risk_data_json};
+        const dataWordData = {data_word_data_json};
         
-        <script>
-            // Data from Python
-            const allFlipsData = {flips_data_json};
-            const testCaseData = {test_case_data_json};
-            const testCaseFlipData = {test_case_flip_data_json};
-            const messageRatesData = {message_rates_data_json};
-            const messageRatesByLocation = {message_rates_by_location_json};
-            const failedRequirementsData = {failed_requirements_data_json};
-            const requirementsAtRiskData = {requirements_at_risk_data_json};
-            const dataWordData = {data_word_data_json};
-            
-            // Filtered data
-            let filteredFlipsData = [...allFlipsData];
-            let filteredTestCaseData = [...testCaseData];
-            let filteredMessageRatesData = [...messageRatesData];
-            let filteredMessageRatesByLocation = [...messageRatesByLocation];
-            let filteredRequirementsData = [...requirementsAtRiskData];
-            let filteredDataWordData = [...dataWordData];
-            
-            // Unique values for filters
-            const uniqueUnits = {unit_ids_json};
-            const uniqueStations = {stations_json};
-            const uniqueSaves = {saves_json};
-            const uniqueMsgTypes = {msg_types_json};
-            const uniqueTestCases = {test_case_ids_json};
-            
-            // Initialize filters
-            function initializeFilters() {{
-                const unitFilter = document.getElementById('globalUnitFilter');
-                uniqueUnits.forEach(unit => {{
-                    const option = document.createElement('option');
-                    option.value = unit;
-                    option.textContent = unit;
-                    unitFilter.appendChild(option);
-                }});
-                
-                const stationFilter = document.getElementById('globalStationFilter');
-                uniqueStations.forEach(station => {{
-                    const option = document.createElement('option');
-                    option.value = station;
-                    option.textContent = station;
-                    stationFilter.appendChild(option);
-                }});
-                
-                const saveFilter = document.getElementById('globalSaveFilter');
-                uniqueSaves.forEach(save => {{
-                    const option = document.createElement('option');
-                    option.value = save;
-                    option.textContent = save;
-                    saveFilter.appendChild(option);
-                }});
-                
-                const msgTypeFilter = document.getElementById('globalMsgTypeFilter');
-                uniqueMsgTypes.forEach(msgType => {{
-                    const option = document.createElement('option');
-                    option.value = msgType;
-                    option.textContent = msgType;
-                    msgTypeFilter.appendChild(option);
-                }});
-                
-                const testCaseFilter = document.getElementById('globalTestCaseFilter');
-                uniqueTestCases.forEach(testCase => {{
-                    const option = document.createElement('option');
-                    option.value = testCase;
-                    option.textContent = testCase;
-                    testCaseFilter.appendChild(option);
-                }});
+        // Filtered data
+        let filteredFlipsData = [...allFlipsData];
+        let filteredTestCaseData = [...testCaseData];
+        let filteredMessageRatesData = [...messageRatesData];
+        let filteredMessageRatesByLocation = [...messageRatesByLocation];
+        let filteredRequirementsData = [...requirementsAtRiskData];
+        let filteredDataWordData = [...dataWordData];
+        
+        // Unique values for filters
+        const uniqueUnits = {unit_ids_json};
+        const uniqueStations = {stations_json};
+        const uniqueSaves = {saves_json};
+        const uniqueMsgTypes = {msg_types_json};
+        const uniqueTestCases = {test_case_ids_json};
+        
+        // Helper function to parse test case names
+        function parseTestCaseName(testCaseId) {{
+            // Handle combined test cases like "QS_2000_02&TW104_01"
+            if (testCaseId.includes('&')) {{
+                return testCaseId.split('&').map(tc => parseIndividualTestCase(tc));
             }}
+            return [parseIndividualTestCase(testCaseId)];
+        }}
+        
+        function parseIndividualTestCase(testCase) {{
+            // Remove trailing numbers and underscores to get base name
+            // e.g., "QS_2000_02" -> "QS_2000"
+            const match = testCase.match(/^(.+?)(_\\d+)?$/);
+            return match ? match[1] : testCase;
+        }}
+        
+        function groupTestCases(testCases) {{
+            const grouped = {{}};
             
-            function updateAllCharts() {{
-                const unitFilter = document.getElementById('globalUnitFilter').value;
-                const stationFilter = document.getElementById('globalStationFilter').value;
-                const saveFilter = document.getElementById('globalSaveFilter').value;
-                const msgTypeFilter = document.getElementById('globalMsgTypeFilter').value;
-                const testCaseFilter = document.getElementById('globalTestCaseFilter').value;
-                
-                // Filter flips data
-                filteredFlipsData = allFlipsData.filter(row => {{
-                    return (!unitFilter || row.unit_id === unitFilter) &&
-                        (!stationFilter || row.station === stationFilter) &&
-                        (!saveFilter || row.save === saveFilter) &&
-                        (!msgTypeFilter || row.msg_type === msgTypeFilter);
-                }});
-                
-                // Filter by test case if selected
-                if (testCaseFilter && testCaseData.length > 0) {{
-                    const testCase = testCaseData.find(tc => tc.test_case_id === testCaseFilter);
-                    if (testCase) {{
-                        filteredFlipsData = filteredFlipsData.filter(flip => {{
-                            const flipTime = parseFloat(flip.timestamp_busA);
-                            const testStart = parseFloat(testCase.timestamp_start);
-                            const testEnd = parseFloat(testCase.timestamp_end);
-                            return flipTime >= testStart && flipTime <= testEnd;
-                        }});
-                    }}
-                }}
-                
-                // Filter test case data
-                filteredTestCaseData = testCaseData.filter(row => {{
-                    return (!unitFilter || row.unit_id === unitFilter) &&
-                        (!stationFilter || row.station === stationFilter) &&
-                        (!saveFilter || row.save === saveFilter) &&
-                        (!testCaseFilter || row.test_case_id === testCaseFilter);
-                }});
-                
-                // Filter message rates by location
-                filteredMessageRatesByLocation = messageRatesByLocation.filter(row => {{
-                    return (!unitFilter || row.unit_id === unitFilter) &&
-                        (!stationFilter || row.station === stationFilter) &&
-                        (!saveFilter || row.save === saveFilter) &&
-                        (!msgTypeFilter || row.msg_type === msgTypeFilter);
-                }});
-                
-                // Filter requirements data
-                filteredRequirementsData = requirementsAtRiskData.filter(row => {{
-                    return (!unitFilter || row.unit_id === unitFilter) &&
-                        (!stationFilter || row.station === stationFilter) &&
-                        (!saveFilter || row.save === saveFilter) &&
-                        (!msgTypeFilter || row.msg_type_affected === msgTypeFilter);
-                }});
-                
-                // Filter data word data
-                filteredDataWordData = dataWordData.filter(row => {{
-                    return (!msgTypeFilter || row.msg_type === msgTypeFilter);
-                }});
-                
-                // Update stats and charts
-                updateStats();
-                updateFilteredCount();
-                drawAllCharts();
-            }}
-            
-            function updateStats() {{
-                const statsRow = document.getElementById('statsRow');
-                
-                // Calculate filtered stats
-                const totalFlips = filteredFlipsData.length;
-                const uniqueUnits = [...new Set(filteredFlipsData.map(f => f.unit_id))].length;
-                const uniqueStations = [...new Set(filteredFlipsData.map(f => f.station))].length;
-                const uniqueSaves = [...new Set(filteredFlipsData.map(f => f.save))].length;
-                const uniqueMsgTypes = [...new Set(filteredFlipsData.filter(f => f.msg_type).map(f => f.msg_type))].length;
-                
-                // Count unique data issues
-                const uniqueDataIssues = filteredFlipsData.filter(f => f.has_data_changes).length;
-                
-                // Test case stats
-                const testCasesWithFlips = testCaseFlipData.filter(tc => {{
-                    const unitFilter = document.getElementById('globalUnitFilter').value;
-                    const stationFilter = document.getElementById('globalStationFilter').value;
-                    const saveFilter = document.getElementById('globalSaveFilter').value;
-                    return (!unitFilter || tc.unit_id === unitFilter) &&
-                        (!stationFilter || tc.station === stationFilter) &&
-                        (!saveFilter || tc.save === saveFilter) &&
-                        tc.total_bus_flips > 0;
-                }}).length;
-                
-                // Calculate flip percentage
-                const flipPercentage = {flip_percentage:.4f};
-                
-                statsRow.innerHTML = `
-                    <div class="stat-card">
-                        <div class="stat-value">${{totalFlips.toLocaleString()}}</div>
-                        <div class="stat-label">Bus Flips</div>
-                    </div>
-                    <div class="stat-card warning">
-                        <div class="stat-value">${{flipPercentage.toFixed(4)}}%</div>
-                        <div class="stat-label">Of Total Messages</div>
-                    </div>
-                    <div class="stat-card warning">
-                        <div class="stat-value">${{uniqueDataIssues.toLocaleString()}}</div>
-                        <div class="stat-label">With Data Changes</div>
-                    </div>
-                    <div class="stat-card info">
-                        <div class="stat-value">${{uniqueUnits}}</div>
-                        <div class="stat-label">Units Affected</div>
-                    </div>
-                    <div class="stat-card info">
-                        <div class="stat-value">${{uniqueStations}}</div>
-                        <div class="stat-label">Stations Affected</div>
-                    </div>
-                    <div class="stat-card success">
-                        <div class="stat-value">${{uniqueSaves}}</div>
-                        <div class="stat-label">Saves Affected</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">${{uniqueMsgTypes}}</div>
-                        <div class="stat-label">Message Types</div>
-                    </div>
-                    <div class="stat-card warning">
-                        <div class="stat-value">${{testCasesWithFlips}}</div>
-                        <div class="stat-label">Test Cases w/ Flips</div>
-                    </div>
-                `;
-            }}
-            
-            function updateFilteredCount() {{
-                const filterStatus = [];
-                const unitFilter = document.getElementById('globalUnitFilter').value;
-                const stationFilter = document.getElementById('globalStationFilter').value;
-                const saveFilter = document.getElementById('globalSaveFilter').value;
-                const msgTypeFilter = document.getElementById('globalMsgTypeFilter').value;
-                const testCaseFilter = document.getElementById('globalTestCaseFilter').value;
-                
-                if (unitFilter) filterStatus.push(`Unit: ${{unitFilter}}`);
-                if (stationFilter) filterStatus.push(`Station: ${{stationFilter}}`);
-                if (saveFilter) filterStatus.push(`Save: ${{saveFilter}}`);
-                if (msgTypeFilter) filterStatus.push(`Msg Type: ${{msgTypeFilter}}`);
-                if (testCaseFilter) filterStatus.push(`Test Case: ${{testCaseFilter}}`);
-                
-                const filterText = filterStatus.length > 0 
-                    ? `Filtered by: ${{filterStatus.join(' | ')}} - Showing ${{filteredFlipsData.length}} of ${{allFlipsData.length}} flips`
-                    : `Showing all ${{allFlipsData.length}} flips`;
-                
-                document.getElementById('filteredCount').textContent = filterText;
-            }}
-            
-            function resetAllFilters() {{
-                document.getElementById('globalUnitFilter').value = '';
-                document.getElementById('globalStationFilter').value = '';
-                document.getElementById('globalSaveFilter').value = '';
-                document.getElementById('globalMsgTypeFilter').value = '';
-                document.getElementById('globalTestCaseFilter').value = '';
-                updateAllCharts();
-            }}
-            
-            function switchTab(tabName) {{
-                // Update button states
-                document.querySelectorAll('.tab-button').forEach(btn => {{
-                    btn.classList.remove('active');
-                }});
-                event.target.classList.add('active');
-                
-                // Update content visibility
-                document.querySelectorAll('.tab-content').forEach(content => {{
-                    content.classList.remove('active');
-                }});
-                document.getElementById(`${{tabName}}-tab`).classList.add('active');
-                
-                // Redraw charts for the active tab
-                switch(tabName) {{
-                    case 'timeline':
-                        drawTimelineCharts();
-                        break;
-                    case 'rates':
-                        drawMessageRateCharts();
-                        break;
-                    case 'testcases':
-                        drawTestCaseCharts();
-                        break;
-                    case 'requirements':
-                        drawRequirementsCharts();
-                        break;
-                    case 'datawords':
-                        drawDataWordCharts();
-                        break;
-                    default:
-                        drawOverviewCharts();
-                }}
-            }}
-            
-            function drawAllCharts() {{
-                drawOverviewCharts();
-                drawTimelineCharts();
-                drawMessageRateCharts();
-                drawTestCaseCharts();
-                drawRequirementsCharts();
-                drawDataWordCharts();
-            }}
-            
-            function drawOverviewCharts() {{
-                // Unit ID Chart
-                const unitCounts = {{}};
-                filteredFlipsData.forEach(d => {{
-                    unitCounts[d.unit_id] = (unitCounts[d.unit_id] || 0) + 1;
-                }});
-                
-                Plotly.newPlot('unitChart', [{{
-                    x: Object.keys(unitCounts),
-                    y: Object.values(unitCounts),
-                    type: 'bar',
-                    marker: {{ color: '#667eea' }}
-                }}], {{
-                    margin: {{ t: 10, b: 40, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Unit ID' }},
-                    yaxis: {{ title: 'Number of Flips' }}
-                }});
-                
-                // Station Chart
-                const stationCounts = {{}};
-                filteredFlipsData.forEach(d => {{
-                    stationCounts[d.station] = (stationCounts[d.station] || 0) + 1;
-                }});
-                
-                Plotly.newPlot('stationChart', [{{
-                    x: Object.keys(stationCounts),
-                    y: Object.values(stationCounts),
-                    type: 'bar',
-                    marker: {{ color: '#764ba2' }}
-                }}], {{
-                    margin: {{ t: 10, b: 40, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Station' }},
-                    yaxis: {{ title: 'Number of Flips' }}
-                }});
-                
-                // Save Chart
-                const saveCounts = {{}};
-                filteredFlipsData.forEach(d => {{
-                    saveCounts[d.save] = (saveCounts[d.save] || 0) + 1;
-                }});
-                
-                Plotly.newPlot('saveChart', [{{
-                    x: Object.keys(saveCounts),
-                    y: Object.values(saveCounts),
-                    type: 'bar',
-                    marker: {{ color: '#4CAF50' }}
-                }}], {{
-                    margin: {{ t: 10, b: 40, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Save' }},
-                    yaxis: {{ title: 'Number of Flips' }}
-                }});
-                
-                // Message Type Chart - Top 20
-                const msgTypeCounts = {{}};
-                filteredFlipsData.forEach(d => {{
-                    if (d.msg_type) {{
-                        msgTypeCounts[d.msg_type] = (msgTypeCounts[d.msg_type] || 0) + 1;
-                    }}
-                }});
-                
-                const sortedMsgTypes = Object.entries(msgTypeCounts)
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 20);
-                
-                Plotly.newPlot('msgTypeChart', [{{
-                    x: sortedMsgTypes.map(x => x[0]),
-                    y: sortedMsgTypes.map(x => x[1]),
-                    type: 'bar',
-                    marker: {{ color: '#ff9800' }}
-                }}], {{
-                    margin: {{ t: 10, b: 100, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Message Type', tickangle: -45 }},
-                    yaxis: {{ title: 'Number of Flips' }}
-                }});
-                
-                // R vs T Chart
-                const rCount = filteredFlipsData.filter(d => {{
-                    if (!d.msg_type) return false;
-                    const msgStr = d.msg_type.toString().trim();
-                    return /^\\d+R/.test(msgStr);
-                }}).length;
-                
-                const tCount = filteredFlipsData.filter(d => {{
-                    if (!d.msg_type) return false;
-                    const msgStr = d.msg_type.toString().trim();
-                    return /^\\d+T/.test(msgStr);
-                }}).length;
-                
-                Plotly.newPlot('rtChart', [{{
-                    x: ['R Messages', 'T Messages'],
-                    y: [rCount, tCount],
-                    type: 'bar',
-                    marker: {{ color: ['#4CAF50', '#2196F3'] }},
-                    text: [rCount, tCount],
-                    textposition: 'auto'
-                }}], {{
-                    margin: {{ t: 10, b: 40, l: 60, r: 20 }},
-                    yaxis: {{ title: 'Count' }}
-                }});
-            }}
-            
-            function drawTimelineCharts() {{
-                if (filteredFlipsData.length === 0) {{
-                    document.getElementById('timelineChart').innerHTML = '<p>No data available</p>';
-                    return;
-                }}
-                
-                // Timeline chart
-                const timestamps = filteredFlipsData.map(d => parseFloat(d.timestamp_busA)).sort((a, b) => a - b);
-                
-                // Create bins for histogram
-                const binSize = 3600; // 1 hour bins
-                const minTime = Math.min(...timestamps);
-                const maxTime = Math.max(...timestamps);
-                const numBins = Math.ceil((maxTime - minTime) / binSize);
-                
-                const bins = new Array(numBins).fill(0);
-                timestamps.forEach(ts => {{
-                    const binIndex = Math.floor((ts - minTime) / binSize);
-                    if (binIndex >= 0 && binIndex < numBins) {{
-                        bins[binIndex]++;
-                    }}
-                }});
-                
-                const binLabels = bins.map((_, i) => {{
-                    const time = minTime + (i * binSize);
-                    return new Date(time * 1000).toLocaleString();
-                }});
-                
-                // Calculate statistics for spike detection
-                const mean = bins.reduce((a, b) => a + b, 0) / bins.length;
-                const stdDev = Math.sqrt(bins.reduce((sq, n) => sq + Math.pow(n - mean, 2), 0) / bins.length);
-                const threshold = mean + (2 * stdDev); // 2 standard deviations
-                
-                // Color bars based on if they're spikes
-                const colors = bins.map(count => count > threshold ? '#e74c3c' : '#3498db');
-                
-                Plotly.newPlot('timelineChart', [{{
-                    x: binLabels,
-                    y: bins,
-                    type: 'bar',
-                    marker: {{ color: colors }},
-                    name: 'Bus Flips per Hour'
-                }}, {{
-                    x: binLabels,
-                    y: new Array(bins.length).fill(threshold),
-                    type: 'scatter',
-                    mode: 'lines',
-                    line: {{ color: '#e74c3c', dash: 'dash', width: 2 }},
-                    name: 'Spike Threshold (Mean + 2σ)'
-                }}], {{
-                    margin: {{ t: 10, b: 100, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Time', tickangle: -45 }},
-                    yaxis: {{ title: 'Bus Flips per Hour' }}
-                }});
-                
-                // Test Case Summary Table instead of timeline
-                if (filteredTestCaseData.length > 0) {{
-                    // Group test cases by test_case_id to get summary
-                    const testCaseSummary = {{}};
-                    
-                    filteredTestCaseData.forEach(tc => {{
-                        if (!testCaseSummary[tc.test_case_id]) {{
-                            testCaseSummary[tc.test_case_id] = {{
-                                startTime: parseFloat(tc.timestamp_start),
-                                endTime: parseFloat(tc.timestamp_end || tc.timestamp_start),
-                                units: new Set(),
-                                stations: new Set(),
-                                saves: new Set(),
-                                hasFlips: false,
-                                flipCount: 0
-                            }};
-                        }}
-                        
-                        const summary = testCaseSummary[tc.test_case_id];
-                        summary.startTime = Math.min(summary.startTime, parseFloat(tc.timestamp_start));
-                        summary.endTime = Math.max(summary.endTime, parseFloat(tc.timestamp_end || tc.timestamp_start));
-                        summary.units.add(tc.unit_id);
-                        summary.stations.add(tc.station);
-                        summary.saves.add(tc.save);
-                        
-                        // Check if this test case had bus flips
-                        const flips = testCaseFlipData.find(tf => 
-                            tf.test_case_id === tc.test_case_id &&
-                            tf.unit_id === tc.unit_id &&
-                            tf.station === tc.station &&
-                            tf.save === tc.save
-                        );
-                        
-                        if (flips && flips.total_bus_flips > 0) {{
-                            summary.hasFlips = true;
-                            summary.flipCount += flips.total_bus_flips;
-                        }}
-                    }});
-                    
-                    // Convert to array for display
-                    const summaryData = Object.entries(testCaseSummary).map(([id, data]) => ({{
-                        testCaseId: id,
-                        duration: (data.endTime - data.startTime).toFixed(2),
-                        startTime: new Date(data.startTime * 1000).toLocaleString(),
-                        unitCount: data.units.size,
-                        stationCount: data.stations.size,
-                        saveCount: data.saves.size,
-                        hasFlips: data.hasFlips,
-                        flipCount: data.flipCount
-                    }})).sort((a, b) => b.duration - a.duration);
-                    
-                    // Create HTML table
-                    let tableHtml = `
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Test Case ID</th>
-                                    <th>Start Time</th>
-                                    <th>Duration (s)</th>
-                                    <th>Units</th>
-                                    <th>Stations</th>
-                                    <th>Saves</th>
-                                    <th>Bus Flips</th>
-                                    <th>Status</th>
-                                </tr>
-                            </thead>
-                            <tbody>`;
-                    
-                    summaryData.slice(0, 50).forEach(row => {{
-                        const statusColor = row.hasFlips ? '#e74c3c' : '#27ae60';
-                        const statusText = row.hasFlips ? 'Has Flips' : 'Clean';
-                        tableHtml += `
-                            <tr>
-                                <td>${{row.testCaseId}}</td>
-                                <td>${{row.startTime}}</td>
-                                <td>${{row.duration}}</td>
-                                <td>${{row.unitCount}}</td>
-                                <td>${{row.stationCount}}</td>
-                                <td>${{row.saveCount}}</td>
-                                <td>${{row.flipCount}}</td>
-                                <td style="color: ${{statusColor}}; font-weight: bold;">${{statusText}}</td>
-                            </tr>`;
-                    }});
-                    
-                    tableHtml += '</tbody></table>';
-                    document.getElementById('testCaseSummaryTable').innerHTML = tableHtml;
-                }} else {{
-                    document.getElementById('testCaseSummaryTable').innerHTML = '<p>No test case data available</p>';
-                }}
-                
-                // Hourly distribution
-                const hourlyData = filteredFlipsData.map(d => {{
-                    const date = new Date(parseFloat(d.timestamp_busA) * 1000);
-                    return date.getHours();
-                }});
-                
-                const hourlyCounts = new Array(24).fill(0);
-                hourlyData.forEach(hour => hourlyCounts[hour]++);
-                
-                Plotly.newPlot('hourlyChart', [{{
-                    x: Array.from({{length: 24}}, (_, i) => `${{i.toString().padStart(2, '0')}}:00`),
-                    y: hourlyCounts,
-                    type: 'bar',
-                    marker: {{ color: '#9b59b6' }}
-                }}], {{
-                    margin: {{ t: 10, b: 60, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Hour of Day' }},
-                    yaxis: {{ title: 'Total Bus Flips' }}
-                }});
-                
-                // Spike analysis
-                const spikes = [];
-                bins.forEach((count, i) => {{
-                    if (count > threshold) {{
-                        spikes.push({{
-                            time: binLabels[i],
-                            count: count,
-                            deviation: ((count - mean) / stdDev).toFixed(2)
-                        }});
-                    }}
-                }});
-                
-                if (spikes.length > 0) {{
-                    const topSpikes = spikes.sort((a, b) => b.count - a.count).slice(0, 10);
-                    
-                    Plotly.newPlot('spikeAnalysis', [{{
-                        x: topSpikes.map(s => s.time),
-                        y: topSpikes.map(s => s.count),
-                        type: 'bar',
-                        marker: {{ color: '#e74c3c' }},
-                        text: topSpikes.map(s => `${{s.deviation}}σ from mean`),
-                        textposition: 'auto'
-                    }}], {{
-                        margin: {{ t: 10, b: 100, l: 60, r: 20 }},
-                        xaxis: {{ title: 'Time Period', tickangle: -45 }},
-                        yaxis: {{ title: 'Bus Flips in Spike' }},
-                        title: {{ text: 'Top 10 Spike Periods', x: 0, xref: 'container' }}
-                    }});
-                }} else {{
-                    document.getElementById('spikeAnalysis').innerHTML = '<p>No significant spikes detected</p>';
-                }}
-            }}
-            
-            function drawMessageRateCharts() {{
-                // Message Rate Statistics by Type
-                if (messageRatesData.length > 0) {{
-                    // Create box plots for message rates
-                    const traceData = [];
-                    
-                    messageRatesData.forEach(msgType => {{
-                        if (msgType.avg_rate && msgType.min_rate && msgType.max_rate) {{
-                            traceData.push({{
-                                y: [msgType.min_rate, msgType.avg_rate, msgType.max_rate],
-                                type: 'box',
-                                name: msgType.msg_type,
-                                boxmean: 'sd'
-                            }});
-                        }}
-                    }});
-                    
-                    // If we have rate data, show top 20 by average rate
-                    const sortedByRate = [...messageRatesData]
-                        .filter(d => d.avg_rate)
-                        .sort((a, b) => b.avg_rate - a.avg_rate)
-                        .slice(0, 20);
-                    
-                    Plotly.newPlot('messageRateStats', [{{
-                        x: sortedByRate.map(d => d.msg_type),
-                        y: sortedByRate.map(d => d.avg_rate || 0),
-                        error_y: {{
-                            type: 'data',
-                            symmetric: false,
-                            array: sortedByRate.map(d => (d.max_rate || d.avg_rate) - d.avg_rate),
-                            arrayminus: sortedByRate.map(d => d.avg_rate - (d.min_rate || d.avg_rate))
-                        }},
-                        type: 'bar',
-                        marker: {{
-                            color: sortedByRate.map(d => 
-                                d.avg_rate > 1000 ? '#e74c3c' : 
-                                d.avg_rate > 100 ? '#f39c12' : '#3498db'
-                            )
-                        }},
-                        text: sortedByRate.map(d => `${{d.avg_rate ? d.avg_rate.toFixed(1) : 0}} msg/s`),
-                        textposition: 'auto'
-                    }}], {{
-                        margin: {{ t: 10, b: 100, l: 60, r: 20 }},
-                        xaxis: {{ title: 'Message Type', tickangle: -45 }},
-                        yaxis: {{ title: 'Messages per Second', type: 'log' }}
-                    }});
-                }} else {{
-                    document.getElementById('messageRateStats').innerHTML = '<p>No message rate data available</p>';
-                }}
-                
-                // Station Rate Summary - Aggregate properly
-                if (filteredMessageRatesByLocation.length > 0) {{
-                    const stationStats = {{}};
-                    
-                    // Group by station and calculate statistics
-                    filteredMessageRatesByLocation.forEach(d => {{
-                        if (!stationStats[d.station]) {{
-                            stationStats[d.station] = {{
-                                rates: [],
-                                msgTypes: new Set(),
-                                units: new Set(),
-                                saves: new Set()
-                            }};
-                        }}
-                        if (d.msg_per_sec) {{
-                            stationStats[d.station].rates.push(d.msg_per_sec);
-                            stationStats[d.station].msgTypes.add(d.msg_type);
-                            stationStats[d.station].units.add(d.unit_id);
-                            stationStats[d.station].saves.add(d.save);
-                        }}
-                    }});
-                    
-                    const stationSummary = Object.entries(stationStats).map(([station, data]) => {{
-                        const rates = data.rates;
-                        return {{
-                            station: station,
-                            avgRate: rates.reduce((a, b) => a + b, 0) / rates.length,
-                            maxRate: Math.max(...rates),
-                            minRate: Math.min(...rates),
-                            msgTypeCount: data.msgTypes.size,
-                            configCount: data.units.size * data.saves.size
-                        }};
-                    }}).sort((a, b) => b.maxRate - a.maxRate);
-                    
-                    Plotly.newPlot('stationRateSummary', [{{
-                        x: stationSummary.map(d => d.station),
-                        y: stationSummary.map(d => d.maxRate),
-                        name: 'Max Rate',
-                        type: 'bar',
-                        marker: {{ color: '#e74c3c' }}
-                    }}, {{
-                        x: stationSummary.map(d => d.station),
-                        y: stationSummary.map(d => d.avgRate),
-                        name: 'Avg Rate',
-                        type: 'scatter',
-                        mode: 'lines+markers',
-                        line: {{ color: '#3498db', width: 3 }},
-                        marker: {{ size: 8 }}
-                    }}], {{
-                        margin: {{ t: 10, b: 60, l: 60, r: 20 }},
-                        xaxis: {{ title: 'Station' }},
-                        yaxis: {{ title: 'Messages per Second', type: 'log' }},
-                        barmode: 'group'
-                    }});
-                }}
-                
-                // High-frequency Station-Save combinations
-                if (filteredMessageRatesByLocation.length > 0) {{
-                    const comboStats = {{}};
-                    
-                    // Group by station-save and message type
-                    filteredMessageRatesByLocation.forEach(d => {{
-                        const key = `${{d.station}}-${{d.save}}`;
-                        if (!comboStats[key]) {{
-                            comboStats[key] = {{}};
-                        }}
-                        if (!comboStats[key][d.msg_type]) {{
-                            comboStats[key][d.msg_type] = [];
-                        }}
-                        if (d.msg_per_sec) {{
-                            comboStats[key][d.msg_type].push(d.msg_per_sec);
-                        }}
-                    }});
-                    
-                    // Calculate aggregated stats
-                    const comboSummary = [];
-                    Object.entries(comboStats).forEach(([combo, msgTypes]) => {{
-                        Object.entries(msgTypes).forEach(([msgType, rates]) => {{
-                            if (rates.length > 0) {{
-                                comboSummary.push({{
-                                    combo: combo,
-                                    msgType: msgType,
-                                    avgRate: rates.reduce((a, b) => a + b, 0) / rates.length,
-                                    maxRate: Math.max(...rates),
-                                    minRate: Math.min(...rates),
-                                    count: rates.length
-                                }});
-                            }}
-                        }});
-                    }});
-                    
-                    // Get top 20 highest frequency combinations
-                    const topHighFreq = comboSummary
-                        .sort((a, b) => b.maxRate - a.maxRate)
-                        .slice(0, 20);
-                    
-                    Plotly.newPlot('stationSaveHighFreq', [{{
-                        x: topHighFreq.map(d => `${{d.combo}} [${{d.msgType}}]`),
-                        y: topHighFreq.map(d => d.maxRate),
-                        type: 'bar',
-                        marker: {{
-                            color: topHighFreq.map(d => 
-                                d.maxRate > 1000 ? '#e74c3c' : 
-                                d.maxRate > 100 ? '#f39c12' : '#27ae60'
-                            )
-                        }},
-                        text: topHighFreq.map(d => `Max: ${{d.maxRate.toFixed(1)}} msg/s`),
-                        hovertemplate: '%{{x}}<br>Max Rate: %{{y:.1f}} msg/s<br>%{{text}}<extra></extra>'
-                    }}], {{
-                        margin: {{ t: 10, b: 120, l: 60, r: 20 }},
-                        xaxis: {{ title: 'Station-Save [Message Type]', tickangle: -45 }},
-                        yaxis: {{ title: 'Max Messages per Second', type: 'log' }}
-                    }});
-                }}
-                
-                // Rate metrics
-                if (filteredMessageRatesByLocation.length > 0) {{
-                    const allRates = filteredMessageRatesByLocation
-                        .filter(d => d.msg_per_sec)
-                        .map(d => d.msg_per_sec);
-                        
-                    if (allRates.length > 0) {{
-                        const criticalCount = allRates.filter(r => r > 1000).length;
-                        const warningCount = allRates.filter(r => r > 100 && r <= 1000).length;
-                        const normalCount = allRates.filter(r => r <= 100).length;
-                        
-                        const metricsHtml = `
-                            <div class="metric-card">
-                                <div class="metric-title">Total Configurations</div>
-                                <div class="metric-value">${{filteredMessageRatesByLocation.length}}</div>
-                            </div>
-                            <div class="metric-card">
-                                <div class="metric-title">Critical Rate (>1000 msg/s)</div>
-                                <div class="metric-value" style="color: #e74c3c;">${{criticalCount}}</div>
-                            </div>
-                            <div class="metric-card">
-                                <div class="metric-title">Warning Rate (100-1000 msg/s)</div>
-                                <div class="metric-value" style="color: #f39c12;">${{warningCount}}</div>
-                            </div>
-                            <div class="metric-card">
-                                <div class="metric-title">Normal Rate (<100 msg/s)</div>
-                                <div class="metric-value" style="color: #27ae60;">${{normalCount}}</div>
-                            </div>
-                            <div class="metric-card">
-                                <div class="metric-title">Highest Rate</div>
-                                <div class="metric-value">${{Math.max(...allRates).toFixed(1)}} msg/s</div>
-                            </div>
-                            <div class="metric-card">
-                                <div class="metric-title">Median Rate</div>
-                                <div class="metric-value">${{allRates.sort((a,b) => a-b)[Math.floor(allRates.length/2)].toFixed(1)}} msg/s</div>
-                            </div>
-                        `;
-                        document.getElementById('rateMetrics').innerHTML = metricsHtml;
-                    }}
-                }}
-            }}
-            
-            function drawTestCaseCharts() {{
-                if (testCaseFlipData.length === 0) {{
-                    document.getElementById('testCaseFlipCounts').innerHTML = '<p>No test case data available</p>';
-                    return;
-                }}
-                
-                // Filter test case flip data
-                const filteredTestFlips = testCaseFlipData.filter(tc => {{
-                    const unitFilter = document.getElementById('globalUnitFilter').value;
-                    const stationFilter = document.getElementById('globalStationFilter').value;
-                    const saveFilter = document.getElementById('globalSaveFilter').value;
-                    const testCaseFilter = document.getElementById('globalTestCaseFilter').value;
-                    return (!unitFilter || tc.unit_id === unitFilter) &&
-                        (!stationFilter || tc.station === stationFilter) &&
-                        (!saveFilter || tc.save === saveFilter) &&
-                        (!testCaseFilter || tc.test_case_id === testCaseFilter);
-                }});
-                
-                // Test cases with most flips
-                const topTestCases = filteredTestFlips
-                    .sort((a, b) => b.total_bus_flips - a.total_bus_flips)
-                    .slice(0, 20);
-                
-                Plotly.newPlot('testCaseFlipCounts', [{{
-                    x: topTestCases.map(d => d.test_case_id),
-                    y: topTestCases.map(d => d.total_bus_flips),
-                    type: 'bar',
-                    marker: {{ color: '#3498db' }},
-                    text: topTestCases.map(d => `${{d.unit_id}}-${{d.station}}-${{d.save}}`),
-                    hovertemplate: 'Test Case: %{{x}}<br>Flips: %{{y}}<br>Location: %{{text}}<extra></extra>'
-                }}], {{
-                    margin: {{ t: 10, b: 100, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Test Case ID', tickangle: -45 }},
-                    yaxis: {{ title: 'Total Bus Flips' }}
-                }});
-                
-                // Test case statistics - Fixed to count unique message types per test case
-                const testCaseStats = {{}};
-                filteredTestFlips.forEach(tc => {{
-                    if (!testCaseStats[tc.test_case_id]) {{
-                        testCaseStats[tc.test_case_id] = {{
-                            locations: new Set(),
+            testCases.forEach(tc => {{
+                const baseNames = parseTestCaseName(tc.test_case_id);
+                baseNames.forEach(baseName => {{
+                    if (!grouped[baseName]) {{
+                        grouped[baseName] = {{
+                            baseName: baseName,
+                            instances: [],
                             totalFlips: 0,
-                            msgTypes: new Set()
+                            uniqueMsgTypes: new Set(),
+                            uniqueLocations: new Set(),
+                            timeRanges: []
                         }};
                     }}
-                    testCaseStats[tc.test_case_id].locations.add(`${{tc.unit_id}}-${{tc.station}}-${{tc.save}}`);
-                    testCaseStats[tc.test_case_id].totalFlips += tc.total_bus_flips;
-                    // Only add message types from this specific test case instance
-                    if (tc.msg_types_list) {{
-                        tc.msg_types_list.split(', ').forEach(mt => testCaseStats[tc.test_case_id].msgTypes.add(mt));
-                    }}
+                    grouped[baseName].instances.push(tc);
                 }});
-                
-                const statsData = Object.entries(testCaseStats).map(([tcId, stats]) => ({{
-                    testCase: tcId,
-                    locations: stats.locations.size,
-                    totalFlips: stats.totalFlips,
-                    msgTypes: stats.msgTypes.size
-                }})).sort((a, b) => b.totalFlips - a.totalFlips).slice(0, 10);
-                
-                Plotly.newPlot('testCaseStats', [{{
-                    x: statsData.map(d => d.testCase),
-                    y: statsData.map(d => d.totalFlips),
-                    name: 'Total Flips',
-                    type: 'bar',
-                    marker: {{ color: '#e74c3c' }}
-                }}, {{
-                    x: statsData.map(d => d.testCase),
-                    y: statsData.map(d => d.msgTypes),
-                    name: 'Unique Message Types',
-                    type: 'scatter',
-                    mode: 'lines+markers',
-                    yaxis: 'y2',
-                    line: {{ color: '#3498db', width: 3 }},
-                    marker: {{ size: 8 }}
-                }}], {{
-                    margin: {{ t: 10, b: 100, l: 60, r: 60 }},
-                    xaxis: {{ title: 'Test Case ID', tickangle: -45 }},
-                    yaxis: {{ title: 'Total Flips' }},
-                    yaxis2: {{
-                        title: 'Unique Message Types',
-                        overlaying: 'y',
-                        side: 'right'
-                    }}
-                }});
-                
-                // Populate test case table
-                const tableBody = document.getElementById('testCaseTableBody');
-                tableBody.innerHTML = '';
-                
-                filteredTestFlips.slice(0, 100).forEach(tc => {{
-                    const row = tableBody.insertRow();
-                    row.insertCell(0).textContent = tc.test_case_id || '';
-                    row.insertCell(1).textContent = tc.unit_id || '';
-                    row.insertCell(2).textContent = tc.station || '';
-                    row.insertCell(3).textContent = tc.save || '';
-                    row.insertCell(4).textContent = tc.total_bus_flips || 0;
-                    row.insertCell(5).textContent = tc.unique_msg_types_affected || 0;
-                    row.insertCell(6).textContent = tc.most_common_msg_type || 'N/A';
-                    row.insertCell(7).textContent = `${{(tc.test_case_duration || 0).toFixed(2)}}`;
-                }});
-            }}
+            }});
             
-            function drawRequirementsCharts() {{
-                if (filteredRequirementsData.length === 0) {{
-                    document.getElementById('requirementsChart').innerHTML = '<p>No requirements data available</p>';
-                    return;
-                }}
-                
-                // Aggregate by requirement name - NEW APPROACH for test cases
-                const reqSummary = {{}};
-                
-                // First, create a map of all test cases that had flips
-                const testCasesWithFlips = new Set();
-                testCaseFlipData.forEach(tf => {{
-                    if (tf.total_bus_flips > 0) {{
-                        testCasesWithFlips.add(tf.test_case_id);
+            // Calculate aggregated stats for each group
+            Object.values(grouped).forEach(group => {{
+                group.instances.forEach(instance => {{
+                    // Aggregate flips
+                    if (instance.total_bus_flips) {{
+                        group.totalFlips += instance.total_bus_flips;
                     }}
-                }});
-                
-                filteredRequirementsData.forEach(r => {{
-                    if (!reqSummary[r.requirement_name]) {{
-                        reqSummary[r.requirement_name] = {{
-                            flipCount: 0,
-                            msgTypes: new Set(),
-                            testCases: new Set(),
-                            locations: new Set(),
-                            affectedTestCases: new Set()
-                        }};
+                    
+                    // Collect unique message types
+                    if (instance.msg_types_list) {{
+                        instance.msg_types_list.split(', ').forEach(mt => group.uniqueMsgTypes.add(mt));
                     }}
-                    reqSummary[r.requirement_name].flipCount += r.flip_count;
-                    reqSummary[r.requirement_name].msgTypes.add(r.msg_type_affected);
-                    reqSummary[r.requirement_name].locations.add(`${{r.unit_id}}/${{r.station}}/${{r.save}}`);
                     
-                    // New approach: Look for test cases from the test case data directly
-                    const matchingTestCases = testCaseData.filter(tc => 
-                        tc.unit_id === r.unit_id && 
-                        tc.station === r.station && 
-                        tc.save === r.save
-                    );
+                    // Collect unique locations
+                    const location = `${{instance.unit_id}}/${{instance.station}}/${{instance.save}}`;
+                    group.uniqueLocations.add(location);
                     
-                    matchingTestCases.forEach(tc => {{
-                        reqSummary[r.requirement_name].testCases.add(tc.test_case_id);
-                        if (testCasesWithFlips.has(tc.test_case_id)) {{
-                            reqSummary[r.requirement_name].affectedTestCases.add(tc.test_case_id);
-                        }}
-                    }});
-                    
-                    // Also try the old approach as fallback
-                    if (r.test_case_ids && r.test_case_ids !== 'N/A' && r.test_case_ids !== '') {{
-                        const tcIds = r.test_case_ids.toString().split(/[,;\\s]+/);
-                        tcIds.forEach(tc => {{
-                            const trimmed = tc.trim();
-                            if (trimmed && trimmed !== 'N/A') {{
-                                reqSummary[r.requirement_name].testCases.add(trimmed);
-                            }}
+                    // Collect time ranges
+                    if (instance.timestamp_start && instance.timestamp_end) {{
+                        group.timeRanges.push({{
+                            start: parseFloat(instance.timestamp_start),
+                            end: parseFloat(instance.timestamp_end),
+                            location: location
                         }});
                     }}
                 }});
                 
-                const reqData = Object.entries(reqSummary).map(([name, data]) => ({{
-                    name: name,
-                    flips: data.flipCount,
-                    msgTypes: data.msgTypes.size,
-                    testCases: data.testCases.size,
-                    locations: data.locations.size
-                }})).sort((a, b) => b.flips - a.flips).slice(0, 20);
-                
-                Plotly.newPlot('requirementsChart', [{{
-                    x: reqData.map(d => d.name),
-                    y: reqData.map(d => d.flips),
-                    type: 'bar',
-                    marker: {{ color: '#e74c3c' }},
-                    text: reqData.map(d => `${{d.testCases}} test cases, ${{d.msgTypes}} msg types`),
-                    hovertemplate: '%{{x}}<br>Flips: %{{y}}<br>%{{text}}<extra></extra>'
-                }}], {{
-                    margin: {{ t: 10, b: 120, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Requirement Name', tickangle: -45 }},
-                    yaxis: {{ title: 'Total Bus Flips' }}
-                }});
-                
-                // Populate requirements table
-                const tableBody = document.getElementById('requirementsTableBody');
-                tableBody.innerHTML = '';
-                
-                filteredRequirementsData.slice(0, 100).forEach(r => {{
-                    const row = tableBody.insertRow();
-                    row.insertCell(0).textContent = r.requirement_name || '';
-                    row.insertCell(1).textContent = `${{r.unit_id}}/${{r.station}}/${{r.save}}`;
-                    row.insertCell(2).textContent = r.msg_type_affected || '';
-                    row.insertCell(3).textContent = r.flip_count || 0;
-                    row.insertCell(4).textContent = r.test_cases_affected || '0';
-                    row.insertCell(5).textContent = r.test_case_ids || 'None';
-                }});
-            }}
+                // Calculate average flips per run
+                group.avgFlipsPerRun = group.instances.length > 0 ? 
+                    Math.round(group.totalFlips / group.instances.length) : 0;
+            }});
             
-            function drawDataWordCharts() {{
-                if (filteredDataWordData.length === 0) {{
-                    document.getElementById('dataWordImpactMatrix').innerHTML = '<p>No data word analysis available</p>';
-                    return;
+            return grouped;
+        }}
+        
+        // Initialize filters
+        function initializeFilters() {{
+            const unitFilter = document.getElementById('globalUnitFilter');
+            uniqueUnits.forEach(unit => {{
+                const option = document.createElement('option');
+                option.value = unit;
+                option.textContent = unit;
+                unitFilter.appendChild(option);
+            }});
+            
+            const stationFilter = document.getElementById('globalStationFilter');
+            uniqueStations.forEach(station => {{
+                const option = document.createElement('option');
+                option.value = station;
+                option.textContent = station;
+                stationFilter.appendChild(option);
+            }});
+            
+            const saveFilter = document.getElementById('globalSaveFilter');
+            uniqueSaves.forEach(save => {{
+                const option = document.createElement('option');
+                option.value = save;
+                option.textContent = save;
+                saveFilter.appendChild(option);
+            }});
+            
+            const msgTypeFilter = document.getElementById('globalMsgTypeFilter');
+            uniqueMsgTypes.forEach(msgType => {{
+                const option = document.createElement('option');
+                option.value = msgType;
+                option.textContent = msgType;
+                msgTypeFilter.appendChild(option);
+            }});
+            
+            const testCaseFilter = document.getElementById('globalTestCaseFilter');
+            uniqueTestCases.forEach(testCase => {{
+                const option = document.createElement('option');
+                option.value = testCase;
+                option.textContent = testCase;
+                testCaseFilter.appendChild(option);
+            }});
+        }}
+        
+        function updateAllCharts() {{
+            const unitFilter = document.getElementById('globalUnitFilter').value;
+            const stationFilter = document.getElementById('globalStationFilter').value;
+            const saveFilter = document.getElementById('globalSaveFilter').value;
+            const msgTypeFilter = document.getElementById('globalMsgTypeFilter').value;
+            const testCaseFilter = document.getElementById('globalTestCaseFilter').value;
+            
+            // Filter flips data
+            filteredFlipsData = allFlipsData.filter(row => {{
+                return (!unitFilter || row.unit_id === unitFilter) &&
+                    (!stationFilter || row.station === stationFilter) &&
+                    (!saveFilter || row.save === saveFilter) &&
+                    (!msgTypeFilter || row.msg_type === msgTypeFilter);
+            }});
+            
+            // Filter by test case if selected
+            if (testCaseFilter && testCaseData.length > 0) {{
+                const testCase = testCaseData.find(tc => tc.test_case_id === testCaseFilter);
+                if (testCase) {{
+                    filteredFlipsData = filteredFlipsData.filter(flip => {{
+                        const flipTime = parseFloat(flip.timestamp_busA);
+                        const testStart = parseFloat(testCase.timestamp_start);
+                        const testEnd = parseFloat(testCase.timestamp_end);
+                        return flipTime >= testStart && flipTime <= testEnd;
+                    }});
                 }}
-                
-                // Create impact matrix - bubble chart showing msg type vs data word
-                const matrixData = [];
-                const msgTypeSet = new Set();
-                const dataWordSet = new Set();
-                
-                filteredDataWordData.forEach(d => {{
-                    msgTypeSet.add(d.msg_type);
-                    dataWordSet.add(d.data_word);
-                }});
-                
-                // Create bubble chart data
-                const bubbleData = filteredDataWordData.map(d => ({{
-                    x: d.msg_type,
-                    y: d.data_word,
-                    size: d.total_issues,
-                    color: d.affected_units || 1,
-                    text: `Issues: ${{d.total_issues}}<br>Units: ${{d.affected_units}}<br>Pattern: ${{d.most_common_error || 'N/A'}}`
-                }}));
-                
-                Plotly.newPlot('dataWordImpactMatrix', [{{
-                    x: bubbleData.map(d => d.x),
-                    y: bubbleData.map(d => d.y),
-                    mode: 'markers',
-                    marker: {{
-                        size: bubbleData.map(d => Math.sqrt(d.size) * 3),
-                        color: bubbleData.map(d => d.color),
-                        colorscale: 'Viridis',
-                        showscale: true,
-                        colorbar: {{
-                            title: 'Affected<br>Units'
-                        }}
-                    }},
-                    text: bubbleData.map(d => d.text),
-                    hovertemplate: '%{{x}} - %{{y}}<br>%{{text}}<extra></extra>',
-                    type: 'scatter'
-                }}], {{
-                    margin: {{ t: 10, b: 100, l: 100, r: 60 }},
-                    xaxis: {{ title: 'Message Type', tickangle: -45 }},
-                    yaxis: {{ title: 'Data Word' }},
-                    height: 500
-                }});
-                
-                // Error Pattern Analysis - show most common error transitions
-                const patternCounts = {{}};
-                filteredDataWordData.forEach(d => {{
-                    if (d.most_common_error && d.most_common_error !== 'N/A') {{
-                        const pattern = `${{d.msg_type}}: ${{d.most_common_error}}`;
-                        if (!patternCounts[pattern]) {{
-                            patternCounts[pattern] = 0;
-                        }}
-                        patternCounts[pattern] += d.most_common_count || d.total_issues;
-                    }}
-                }});
-                
-                const topPatterns = Object.entries(patternCounts)
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 15);
-                
-                Plotly.newPlot('errorPatternChart', [{{
-                    x: topPatterns.map(p => p[1]),
-                    y: topPatterns.map(p => p[0]),
-                    type: 'bar',
-                    orientation: 'h',
-                    marker: {{
-                        color: topPatterns.map((_, i) => i < 5 ? '#e74c3c' : '#3498db')
-                    }}
-                }}], {{
-                    margin: {{ t: 10, b: 60, l: 200, r: 20 }},
-                    xaxis: {{ title: 'Frequency' }},
-                    yaxis: {{ title: 'Error Pattern' }},
-                    height: 400
-                }});
-                
-                // Calculate metrics
-                const totalIssues = filteredDataWordData.reduce((sum, d) => sum + d.total_issues, 0);
-                const uniqueDataWords = new Set(filteredDataWordData.map(d => d.data_word)).size;
-                const uniqueMsgTypes = new Set(filteredDataWordData.map(d => d.msg_type)).size;
-                
-                let singleWordIssues = 0;
-                let multiWordIssues = 0;
-                let fastestFlip = Infinity;
-                let avgFlipSpeed = 0;
-                let speedCount = 0;
-                
-                filteredDataWordData.forEach(d => {{
-                    singleWordIssues += d.single_word_changes || 0;
-                    multiWordIssues += d.multi_word_changes || 0;
-                    if (d.avg_flip_speed_ms && d.avg_flip_speed_ms > 0) {{
-                        fastestFlip = Math.min(fastestFlip, d.avg_flip_speed_ms);
-                        avgFlipSpeed += d.avg_flip_speed_ms;
-                        speedCount++;
-                    }}
-                }});
-                
-                avgFlipSpeed = speedCount > 0 ? (avgFlipSpeed / speedCount) : 0;
-                const multiWordPercent = totalIssues > 0 ? ((multiWordIssues / (singleWordIssues + multiWordIssues)) * 100) : 0;
-                
-                const metricsHtml = `
-                    <div class="metric-card">
-                        <div class="metric-title">Total Data Word Issues</div>
-                        <div class="metric-value">${{totalIssues.toLocaleString()}}</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-title">Unique Data Words</div>
-                        <div class="metric-value">${{uniqueDataWords}}</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-title">Affected Message Types</div>
-                        <div class="metric-value">${{uniqueMsgTypes}}</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-title">Multi-Word Changes</div>
-                        <div class="metric-value" style="color: #e74c3c;">${{multiWordPercent.toFixed(1)}}%</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-title">Fastest Flip Speed</div>
-                        <div class="metric-value">${{fastestFlip === Infinity ? 'N/A' : fastestFlip.toFixed(3) + 'ms'}}</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-title">Avg Flip Speed</div>
-                        <div class="metric-value">${{avgFlipSpeed > 0 ? avgFlipSpeed.toFixed(3) + 'ms' : 'N/A'}}</div>
-                    </div>
-                `;
-                document.getElementById('dataWordMetrics').innerHTML = metricsHtml;
-                
-                // Populate improved data word table
-                const tableBody = document.getElementById('dataWordTableBody');
-                tableBody.innerHTML = '';
-                
-                filteredDataWordData.slice(0, 50).forEach(d => {{
-                    const row = tableBody.insertRow();
-                    const singleMulti = (d.single_word_changes || 0) > (d.multi_word_changes || 0) ? 'Single' : 'Multi';
-                    const locations = `${{d.affected_units || 0}}U/${{d.affected_stations || 0}}S/${{d.affected_saves || 0}}S`;
-                    
-                    row.insertCell(0).textContent = d.msg_type || '';
-                    row.insertCell(1).textContent = d.data_word || '';
-                    row.insertCell(2).textContent = d.total_issues || 0;
-                    row.insertCell(3).textContent = singleMulti;
-                    row.insertCell(4).textContent = d.most_common_error || 'N/A';
-                    row.insertCell(5).textContent = d.avg_flip_speed_ms ? d.avg_flip_speed_ms.toFixed(3) : 'N/A';
-                    row.insertCell(6).textContent = locations;
-                }});
             }}
             
-            function sortTable(tableId, column) {{
-                const table = document.getElementById(tableId);
-                const tbody = table.querySelector('tbody');
-                const rows = Array.from(tbody.querySelectorAll('tr'));
-                
-                rows.sort((a, b) => {{
-                    const aVal = a.cells[column].textContent;
-                    const bVal = b.cells[column].textContent;
-                    
-                    // Try to parse as number first
-                    const aNum = parseFloat(aVal);
-                    const bNum = parseFloat(bVal);
-                    
-                    if (!isNaN(aNum) && !isNaN(bNum)) {{
-                        return bNum - aNum; // Descending for numbers
-                    }}
-                    
-                    return aVal.localeCompare(bVal);
-                }});
-                
-                // Re-append sorted rows
-                rows.forEach(row => tbody.appendChild(row));
+            // Filter test case data
+            filteredTestCaseData = testCaseData.filter(row => {{
+                return (!unitFilter || row.unit_id === unitFilter) &&
+                    (!stationFilter || row.station === stationFilter) &&
+                    (!saveFilter || row.save === saveFilter) &&
+                    (!testCaseFilter || row.test_case_id === testCaseFilter);
+            }});
+            
+            // Filter message rates by location
+            filteredMessageRatesByLocation = messageRatesByLocation.filter(row => {{
+                return (!unitFilter || row.unit_id === unitFilter) &&
+                    (!stationFilter || row.station === stationFilter) &&
+                    (!saveFilter || row.save === saveFilter) &&
+                    (!msgTypeFilter || row.msg_type === msgTypeFilter);
+            }});
+            
+            // Filter message rates data for summary
+            if (msgTypeFilter) {{
+                filteredMessageRatesData = messageRatesData.filter(row => row.msg_type === msgTypeFilter);
+            }} else {{
+                filteredMessageRatesData = [...messageRatesData];
             }}
             
-            // Initialize on page load
-            initializeFilters();
+            // Filter requirements data
+            filteredRequirementsData = requirementsAtRiskData.filter(row => {{
+                return (!unitFilter || row.unit_id === unitFilter) &&
+                    (!stationFilter || row.station === stationFilter) &&
+                    (!saveFilter || row.save === saveFilter) &&
+                    (!msgTypeFilter || row.msg_type_affected === msgTypeFilter);
+            }});
+            
+            // Filter data word data
+            filteredDataWordData = dataWordData.filter(row => {{
+                return (!msgTypeFilter || row.msg_type === msgTypeFilter);
+            }});
+            
+            // Update stats and charts
             updateStats();
             updateFilteredCount();
             drawAllCharts();
-        </script>
-    </body>
-    </html>
-    """
+        }}
         
-        with open(dashboard_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
+        function updateStats() {{
+            const statsRow = document.getElementById('statsRow');
+            
+            // Calculate filtered stats
+            const totalFlips = filteredFlipsData.length;
+            const uniqueUnits = [...new Set(filteredFlipsData.map(f => f.unit_id))].length;
+            const uniqueStations = [...new Set(filteredFlipsData.map(f => f.station))].length;
+            const uniqueSaves = [...new Set(filteredFlipsData.map(f => f.save))].length;
+            const uniqueMsgTypes = [...new Set(filteredFlipsData.filter(f => f.msg_type).map(f => f.msg_type))].length;
+            
+            // Count unique data issues
+            const uniqueDataIssues = filteredFlipsData.filter(f => f.has_data_changes).length;
+            
+            // Test case stats
+            const testCasesWithFlips = testCaseFlipData.filter(tc => {{
+                const unitFilter = document.getElementById('globalUnitFilter').value;
+                const stationFilter = document.getElementById('globalStationFilter').value;
+                const saveFilter = document.getElementById('globalSaveFilter').value;
+                return (!unitFilter || tc.unit_id === unitFilter) &&
+                    (!stationFilter || tc.station === stationFilter) &&
+                    (!saveFilter || tc.save === saveFilter) &&
+                    tc.total_bus_flips > 0;
+            }}).length;
+            
+            // Calculate flip percentage
+            const flipPercentage = {flip_percentage:.4f};
+            
+            statsRow.innerHTML = `
+                <div class="stat-card">
+                    <div class="stat-value">${{totalFlips.toLocaleString()}}</div>
+                    <div class="stat-label">Bus Flips</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-value">${{flipPercentage.toFixed(4)}}%</div>
+                    <div class="stat-label">Of Total Messages</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-value">${{uniqueDataIssues.toLocaleString()}}</div>
+                    <div class="stat-label">With Data Changes</div>
+                </div>
+                <div class="stat-card info">
+                    <div class="stat-value">${{uniqueUnits}}</div>
+                    <div class="stat-label">Units Affected</div>
+                </div>
+                <div class="stat-card info">
+                    <div class="stat-value">${{uniqueStations}}</div>
+                    <div class="stat-label">Stations Affected</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-value">${{uniqueSaves}}</div>
+                    <div class="stat-label">Saves Affected</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">${{uniqueMsgTypes}}</div>
+                    <div class="stat-label">Message Types</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-value">${{testCasesWithFlips}}</div>
+                    <div class="stat-label">Test Cases w/ Flips</div>
+                </div>
+            `;
+        }}
         
-        print(f"\nEnhanced interactive dashboard saved to: {dashboard_path.absolute()}")
-        return dashboard_path
+        function updateFilteredCount() {{
+            const filterStatus = [];
+            const unitFilter = document.getElementById('globalUnitFilter').value;
+            const stationFilter = document.getElementById('globalStationFilter').value;
+            const saveFilter = document.getElementById('globalSaveFilter').value;
+            const msgTypeFilter = document.getElementById('globalMsgTypeFilter').value;
+            const testCaseFilter = document.getElementById('globalTestCaseFilter').value;
+            
+            if (unitFilter) filterStatus.push(`Unit: ${{unitFilter}}`);
+            if (stationFilter) filterStatus.push(`Station: ${{stationFilter}}`);
+            if (saveFilter) filterStatus.push(`Save: ${{saveFilter}}`);
+            if (msgTypeFilter) filterStatus.push(`Msg Type: ${{msgTypeFilter}}`);
+            if (testCaseFilter) filterStatus.push(`Test Case: ${{testCaseFilter}}`);
+            
+            const filterText = filterStatus.length > 0 
+                ? `Filtered by: ${{filterStatus.join(' | ')}} - Showing ${{filteredFlipsData.length}} of ${{allFlipsData.length}} flips`
+                : `Showing all ${{allFlipsData.length}} flips`;
+            
+            document.getElementById('filteredCount').textContent = filterText;
+        }}
+        
+        function resetAllFilters() {{
+            document.getElementById('globalUnitFilter').value = '';
+            document.getElementById('globalStationFilter').value = '';
+            document.getElementById('globalSaveFilter').value = '';
+            document.getElementById('globalMsgTypeFilter').value = '';
+            document.getElementById('globalTestCaseFilter').value = '';
+            updateAllCharts();
+        }}
+        
+        function switchTab(tabName) {{
+            // Update button states
+            document.querySelectorAll('.tab-button').forEach(btn => {{
+                btn.classList.remove('active');
+            }});
+            event.target.classList.add('active');
+            
+            // Update content visibility
+            document.querySelectorAll('.tab-content').forEach(content => {{
+                content.classList.remove('active');
+            }});
+            document.getElementById(`${{tabName}}-tab`).classList.add('active');
+            
+            // Redraw charts for the active tab
+            switch(tabName) {{
+                case 'timeline':
+                    drawTimelineCharts();
+                    break;
+                case 'rates':
+                    drawMessageRateCharts();
+                    break;
+                case 'testcases':
+                    drawTestCaseCharts();
+                    break;
+                case 'requirements':
+                    drawRequirementsCharts();
+                    break;
+                case 'datawords':
+                    drawDataWordCharts();
+                    break;
+                default:
+                    drawOverviewCharts();
+            }}
+        }}
+        
+        function drawAllCharts() {{
+            drawOverviewCharts();
+            drawTimelineCharts();
+            drawMessageRateCharts();
+            drawTestCaseCharts();
+            drawRequirementsCharts();
+            drawDataWordCharts();
+        }}
+        
+        function drawOverviewCharts() {{
+            // Unit ID Chart
+            const unitCounts = {{}};
+            filteredFlipsData.forEach(d => {{
+                unitCounts[d.unit_id] = (unitCounts[d.unit_id] || 0) + 1;
+            }});
+            
+            Plotly.newPlot('unitChart', [{{
+                x: Object.keys(unitCounts),
+                y: Object.values(unitCounts),
+                type: 'bar',
+                marker: {{ color: '#667eea' }}
+            }}], {{
+                margin: {{ t: 10, b: 40, l: 60, r: 20 }},
+                xaxis: {{ title: 'Unit ID' }},
+                yaxis: {{ title: 'Number of Flips' }}
+            }});
+            
+            // Station Chart
+            const stationCounts = {{}};
+            filteredFlipsData.forEach(d => {{
+                stationCounts[d.station] = (stationCounts[d.station] || 0) + 1;
+            }});
+            
+            Plotly.newPlot('stationChart', [{{
+                x: Object.keys(stationCounts),
+                y: Object.values(stationCounts),
+                type: 'bar',
+                marker: {{ color: '#764ba2' }}
+            }}], {{
+                margin: {{ t: 10, b: 40, l: 60, r: 20 }},
+                xaxis: {{ title: 'Station' }},
+                yaxis: {{ title: 'Number of Flips' }}
+            }});
+            
+            // Save Chart
+            const saveCounts = {{}};
+            filteredFlipsData.forEach(d => {{
+                saveCounts[d.save] = (saveCounts[d.save] || 0) + 1;
+            }});
+            
+            Plotly.newPlot('saveChart', [{{
+                x: Object.keys(saveCounts),
+                y: Object.values(saveCounts),
+                type: 'bar',
+                marker: {{ color: '#4CAF50' }}
+            }}], {{
+                margin: {{ t: 10, b: 40, l: 60, r: 20 }},
+                xaxis: {{ title: 'Save' }},
+                yaxis: {{ title: 'Number of Flips' }}
+            }});
+            
+            // Message Type Chart - Top 20
+            const msgTypeCounts = {{}};
+            filteredFlipsData.forEach(d => {{
+                if (d.msg_type) {{
+                    msgTypeCounts[d.msg_type] = (msgTypeCounts[d.msg_type] || 0) + 1;
+                }}
+            }});
+            
+            const sortedMsgTypes = Object.entries(msgTypeCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 20);
+            
+            Plotly.newPlot('msgTypeChart', [{{
+                x: sortedMsgTypes.map(x => x[0]),
+                y: sortedMsgTypes.map(x => x[1]),
+                type: 'bar',
+                marker: {{ color: '#ff9800' }}
+            }}], {{
+                margin: {{ t: 10, b: 100, l: 60, r: 20 }},
+                xaxis: {{ title: 'Message Type', tickangle: -45 }},
+                yaxis: {{ title: 'Number of Flips' }}
+            }});
+            
+            // R vs T Chart
+            const rCount = filteredFlipsData.filter(d => {{
+                if (!d.msg_type) return false;
+                const msgStr = d.msg_type.toString().trim();
+                return /^\\d+R/.test(msgStr);
+            }}).length;
+            
+            const tCount = filteredFlipsData.filter(d => {{
+                if (!d.msg_type) return false;
+                const msgStr = d.msg_type.toString().trim();
+                return /^\\d+T/.test(msgStr);
+            }}).length;
+            
+            Plotly.newPlot('rtChart', [{{
+                x: ['R Messages', 'T Messages'],
+                y: [rCount, tCount],
+                type: 'bar',
+                marker: {{ color: ['#4CAF50', '#2196F3'] }},
+                text: [rCount, tCount],
+                textposition: 'auto'
+            }}], {{
+                margin: {{ t: 10, b: 40, l: 60, r: 20 }},
+                yaxis: {{ title: 'Count' }}
+            }});
+        }}
+        
+        function drawTimelineCharts() {{
+            if (filteredFlipsData.length === 0) {{
+                document.getElementById('timelineChart').innerHTML = '<p>No data available</p>';
+                return;
+            }}
+            
+            // Timeline chart without threshold line
+            const timestamps = filteredFlipsData.map(d => parseFloat(d.timestamp_busA)).sort((a, b) => a - b);
+            
+            // Create bins for histogram
+            const binSize = 3600; // 1 hour bins
+            const minTime = Math.min(...timestamps);
+            const maxTime = Math.max(...timestamps);
+            const numBins = Math.ceil((maxTime - minTime) / binSize);
+            
+            const bins = new Array(numBins).fill(0);
+            const binMsgTypes = new Array(numBins).fill(null).map(() => new Set());
+            const binTestCases = new Array(numBins).fill(null).map(() => new Set());
+            
+            timestamps.forEach(ts => {{
+                const binIndex = Math.floor((ts - minTime) / binSize);
+                if (binIndex >= 0 && binIndex < numBins) {{
+                    bins[binIndex]++;
+                }}
+            }});
+            
+            // Track message types and test cases for each bin
+            filteredFlipsData.forEach(flip => {{
+                const ts = parseFloat(flip.timestamp_busA);
+                const binIndex = Math.floor((ts - minTime) / binSize);
+                if (binIndex >= 0 && binIndex < numBins) {{
+                    if (flip.msg_type) binMsgTypes[binIndex].add(flip.msg_type);
+                    
+                    // Find test cases running at this time
+                    filteredTestCaseData.forEach(tc => {{
+                        const tcStart = parseFloat(tc.timestamp_start);
+                        const tcEnd = parseFloat(tc.timestamp_end);
+                        if (ts >= tcStart && ts <= tcEnd) {{
+                            binTestCases[binIndex].add(tc.test_case_id);
+                        }}
+                    }});
+                }}
+            }});
+            
+            const binLabels = bins.map((_, i) => {{
+                const time = minTime + (i * binSize);
+                return new Date(time * 1000).toLocaleString();
+            }});
+            
+            // Calculate statistics for spike detection
+            const mean = bins.reduce((a, b) => a + b, 0) / bins.length;
+            const stdDev = Math.sqrt(bins.reduce((sq, n) => sq + Math.pow(n - mean, 2), 0) / bins.length);
+            const threshold = mean + (2 * stdDev);
+            
+            // Color bars based on if they're spikes
+            const colors = bins.map(count => count > threshold ? '#e74c3c' : '#3498db');
+            
+            Plotly.newPlot('timelineChart', [{{
+                x: binLabels,
+                y: bins,
+                type: 'bar',
+                marker: {{ color: colors }},
+                name: 'Bus Flips per Hour',
+                hovertemplate: 'Time: %{{x}}<br>Flips: %{{y}}<br>Message Types: %{{customdata}}<extra></extra>',
+                customdata: binMsgTypes.map(s => Array.from(s).join(', ') || 'None')
+            }}], {{
+                margin: {{ t: 10, b: 100, l: 60, r: 20 }},
+                xaxis: {{ title: 'Time', tickangle: -45 }},
+                yaxis: {{ title: 'Bus Flips per Hour' }}
+            }});
+            
+            // Test Case Summary Table - Grouped
+            if (filteredTestCaseData.length > 0) {{
+                const groupedTestCases = groupTestCases(testCaseFlipData);
+                
+                // Sort by total flips
+                const sortedGroups = Object.values(groupedTestCases)
+                    .sort((a, b) => b.totalFlips - a.totalFlips)
+                    .slice(0, 50);
+                
+                let tableHtml = `
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Test Case Group</th>
+                                <th>Total Bus Flips</th>
+                                <th>Run Count</th>
+                                <th>Unique Locations</th>
+                                <th>Time Range</th>
+                                <th>Msg Types</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
+                
+                sortedGroups.forEach(group => {{
+                    const statusColor = group.totalFlips > 0 ? '#e74c3c' : '#27ae60';
+                    const statusText = group.totalFlips > 0 ? 'Has Flips' : 'Clean';
+                    
+                    // Format time range
+                    let timeRange = '';
+                    if (group.timeRanges.length > 0) {{
+                        const minTime = Math.min(...group.timeRanges.map(r => r.start));
+                        const maxTime = Math.max(...group.timeRanges.map(r => r.end));
+                        const startDate = new Date(minTime * 1000).toLocaleString();
+                        const endDate = new Date(maxTime * 1000).toLocaleString();
+                        timeRange = `${{startDate}} - ${{endDate}}`;
+                    }}
+                    
+                    tableHtml += `
+                        <tr>
+                            <td>${{group.baseName}}</td>
+                            <td>${{group.totalFlips}}</td>
+                            <td>${{group.instances.length}}</td>
+                            <td>${{group.uniqueLocations.size}}</td>
+                            <td>${{timeRange}}</td>
+                            <td>${{group.uniqueMsgTypes.size}}</td>
+                            <td style="color: ${{statusColor}}; font-weight: bold;">${{statusText}}</td>
+                        </tr>`;
+                }});
+                
+                tableHtml += '</tbody></table>';
+                document.getElementById('testCaseSummaryTable').innerHTML = tableHtml;
+            }} else {{
+                document.getElementById('testCaseSummaryTable').innerHTML = '<p>No test case data available</p>';
+            }}
+            
+            // Hourly distribution
+            const hourlyData = filteredFlipsData.map(d => {{
+                const date = new Date(parseFloat(d.timestamp_busA) * 1000);
+                return date.getHours();
+            }});
+            
+            const hourlyCounts = new Array(24).fill(0);
+            hourlyData.forEach(hour => hourlyCounts[hour]++);
+            
+            Plotly.newPlot('hourlyChart', [{{
+                x: Array.from({{length: 24}}, (_, i) => `${{i.toString().padStart(2, '0')}}:00`),
+                y: hourlyCounts,
+                type: 'bar',
+                marker: {{ color: '#9b59b6' }}
+            }}], {{
+                margin: {{ t: 10, b: 60, l: 60, r: 20 }},
+                xaxis: {{ title: 'Hour of Day' }},
+                yaxis: {{ title: 'Total Bus Flips' }}
+            }});
+            
+            // Enhanced spike analysis with message types and test cases
+            const spikes = [];
+            bins.forEach((count, i) => {{
+                if (count > threshold) {{
+                    spikes.push({{
+                        time: binLabels[i],
+                        count: count,
+                        deviation: ((count - mean) / stdDev).toFixed(2),
+                        msgTypes: Array.from(binMsgTypes[i]).slice(0, 5).join(', ') || 'None',
+                        testCases: Array.from(binTestCases[i]).slice(0, 3).join(', ') || 'None'
+                    }});
+                }}
+            }});
+            
+            if (spikes.length > 0) {{
+                const topSpikes = spikes.sort((a, b) => b.count - a.count).slice(0, 10);
+                
+                // Create detailed spike table
+                let spikeHtml = `
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Time Period</th>
+                                <th>Bus Flips</th>
+                                <th>Deviation (σ)</th>
+                                <th>Top Message Types</th>
+                                <th>Test Cases Running</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
+                
+                topSpikes.forEach(spike => {{
+                    spikeHtml += `
+                        <tr>
+                            <td>${{spike.time}}</td>
+                            <td>${{spike.count}}</td>
+                            <td>${{spike.deviation}}σ</td>
+                            <td>${{spike.msgTypes}}</td>
+                            <td>${{spike.testCases}}</td>
+                        </tr>`;
+                }});
+                
+                spikeHtml += '</tbody></table>';
+                document.getElementById('spikeAnalysis').innerHTML = spikeHtml;
+            }} else {{
+                document.getElementById('spikeAnalysis').innerHTML = '<p>No significant spikes detected</p>';
+            }}
+        }}
+        
+        function drawMessageRateCharts() {{
+            // Message Rate Statistics by Type - with filtering support
+            if (filteredMessageRatesData.length > 0) {{
+                // Convert to sampling rate in Hertz (Hz = 1000/ms)
+                const sortedByRate = [...filteredMessageRatesData]
+                    .filter(d => d.avg_time_diff_ms)
+                    .map(d => {{
+                        return {{
+                            ...d,
+                            avg_hz: 1000 / d.avg_time_diff_ms,
+                            min_hz: 1000 / d.max_time_diff_ms,  // min Hz = 1000/max time
+                            max_hz: 1000 / d.min_time_diff_ms   // max Hz = 1000/min time
+                        }};
+                    }})
+                    .sort((a, b) => b.avg_hz - a.avg_hz)
+                    .slice(0, 20);
+                
+                Plotly.newPlot('messageRateStats', [{{
+                    x: sortedByRate.map(d => d.msg_type),
+                    y: sortedByRate.map(d => d.avg_hz),
+                    error_y: {{
+                        type: 'data',
+                        symmetric: false,
+                        array: sortedByRate.map(d => d.max_hz - d.avg_hz),
+                        arrayminus: sortedByRate.map(d => d.avg_hz - d.min_hz)
+                    }},
+                    type: 'bar',
+                    marker: {{
+                        color: sortedByRate.map(d => 
+                            d.avg_hz > 1000 ? '#e74c3c' :   // >1kHz critical
+                            d.avg_hz > 100 ? '#f39c12' :    // >100Hz warning
+                            '#3498db'                        // normal
+                        )
+                    }},
+                    text: sortedByRate.map(d => `${{d.avg_hz.toFixed(1)}} Hz`),
+                    textposition: 'auto',
+                    hovertemplate: 'Msg Type: %{{x}}<br>Avg Sampling Rate: %{{y:.1f}} Hz<br>Period: %{{customdata:.3f}}ms<extra></extra>',
+                    customdata: sortedByRate.map(d => d.avg_time_diff_ms)
+                }}], {{
+                    margin: {{ t: 10, b: 100, l: 60, r: 20 }},
+                    xaxis: {{ title: 'Message Type', tickangle: -45 }},
+                    yaxis: {{ title: 'Sampling Rate (Hz)', type: 'log' }},
+                    annotations: [
+                        {{
+                            x: 0.5,
+                            y: 1,
+                            xref: 'paper',
+                            yref: 'paper',
+                            text: 'Sampling frequency in Hertz (samples/second)',
+                            showarrow: false,
+                            font: {{ size: 12, color: '#7f8c8d' }}
+                        }}
+                    ]
+                }});
+            }} else {{
+                document.getElementById('messageRateStats').innerHTML = '<p>No message rate data available</p>';
+            }}
+            
+            // Station Rate Summary - Proper aggregation
+            if (filteredMessageRatesByLocation.length > 0) {{
+                const stationStats = {{}};
+                
+                // Group by station but keep save-level granularity
+                filteredMessageRatesByLocation.forEach(d => {{
+                    const key = `${{d.station}}-${{d.save}}`;
+                    if (!stationStats[key]) {{
+                        stationStats[key] = {{
+                            station: d.station,
+                            save: d.save,
+                            rates: [],
+                            msgTypes: new Set()
+                        }};
+                    }}
+                    if (d.msg_per_sec) {{
+                        stationStats[key].rates.push(d.msg_per_sec);
+                        stationStats[key].msgTypes.add(d.msg_type);
+                    }}
+                }});
+                
+                // Aggregate by station for summary
+                const stationSummary = {{}};
+                Object.values(stationStats).forEach(stat => {{
+                    if (!stationSummary[stat.station]) {{
+                        stationSummary[stat.station] = {{
+                            allRates: [],
+                            saves: new Set()
+                        }};
+                    }}
+                    stationSummary[stat.station].allRates.push(...stat.rates);
+                    stationSummary[stat.station].saves.add(stat.save);
+                }});
+                
+                const summaryData = Object.entries(stationSummary).map(([station, data]) => {{
+                    const rates = data.allRates;
+                    return {{
+                        station: station,
+                        avgRate: rates.reduce((a, b) => a + b, 0) / rates.length,
+                        maxRate: Math.max(...rates),
+                        minRate: Math.min(...rates),
+                        saveCount: data.saves.size
+                    }};
+                }}).sort((a, b) => b.maxRate - a.maxRate);
+                
+                Plotly.newPlot('stationRateSummary', [{{
+                    x: summaryData.map(d => d.station),
+                    y: summaryData.map(d => d.maxRate),
+                    name: 'Max Rate',
+                    type: 'bar',
+                    marker: {{ color: '#e74c3c' }}
+                }}, {{
+                    x: summaryData.map(d => d.station),
+                    y: summaryData.map(d => d.avgRate),
+                    name: 'Avg Rate',
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: {{ color: '#3498db', width: 3 }},
+                    marker: {{ size: 8 }}
+                }}], {{
+                    margin: {{ t: 10, b: 60, l: 60, r: 20 }},
+                    xaxis: {{ title: 'Station' }},
+                    yaxis: {{ title: 'Messages per Second', type: 'log' }},
+                    barmode: 'group'
+                }});
+                
+                // High-frequency Station-Save combinations - Properly calculated
+                const comboStats = {{}};
+                
+                // Group properly by station-save-msgtype
+                filteredMessageRatesByLocation.forEach(d => {{
+                    const key = `${{d.station}}-${{d.save}}-${{d.msg_type}}`;
+                    if (!comboStats[key]) {{
+                        comboStats[key] = {{
+                            station: d.station,
+                            save: d.save,
+                            msgType: d.msg_type,
+                            rates: []
+                        }};
+                    }}
+                    if (d.msg_per_sec) {{
+                        comboStats[key].rates.push(d.msg_per_sec);
+                    }}
+                }});
+                
+                // Calculate aggregated stats per combination
+                const comboSummary = Object.values(comboStats).map(stat => {{
+                    const rates = stat.rates;
+                    return {{
+                        combo: `${{stat.station}}-${{stat.save}}`,
+                        msgType: stat.msgType,
+                        avgRate: rates.length > 0 ? rates.reduce((a, b) => a + b, 0) / rates.length : 0,
+                        maxRate: rates.length > 0 ? Math.max(...rates) : 0,
+                        minRate: rates.length > 0 ? Math.min(...rates) : 0,
+                        count: rates.length
+                    }};
+                }}).filter(d => d.maxRate > 0);
+                
+                // Get top 20 highest frequency combinations
+                const topHighFreq = comboSummary
+                    .sort((a, b) => b.maxRate - a.maxRate)
+                    .slice(0, 20);
+                
+                Plotly.newPlot('stationSaveHighFreq', [{{
+                    x: topHighFreq.map(d => `${{d.combo}} [${{d.msgType}}]`),
+                    y: topHighFreq.map(d => d.maxRate),
+                    type: 'bar',
+                    marker: {{
+                        color: topHighFreq.map(d => 
+                            d.maxRate > 1000 ? '#e74c3c' : 
+                            d.maxRate > 100 ? '#f39c12' : '#27ae60'
+                        )
+                    }},
+                    text: topHighFreq.map(d => `Max: ${{d.maxRate.toFixed(1)}} msg/s`),
+                    hovertemplate: '%{{x}}<br>Max Rate: %{{y:.1f}} msg/s<br>%{{text}}<extra></extra>'
+                }}], {{
+                    margin: {{ t: 10, b: 120, l: 60, r: 20 }},
+                    xaxis: {{ title: 'Station-Save [Message Type]', tickangle: -45 }},
+                    yaxis: {{ title: 'Max Messages per Second', type: 'log' }}
+                }});
+            }}
+            
+            // Rate metrics
+            if (filteredMessageRatesByLocation.length > 0) {{
+                const allRates = filteredMessageRatesByLocation
+                    .filter(d => d.msg_per_sec)
+                    .map(d => d.msg_per_sec);
+                    
+                if (allRates.length > 0) {{
+                    const criticalCount = allRates.filter(r => r > 1000).length;
+                    const warningCount = allRates.filter(r => r > 100 && r <= 1000).length;
+                    const normalCount = allRates.filter(r => r <= 100).length;
+                    
+                    const metricsHtml = `
+                        <div class="metric-card">
+                            <div class="metric-title">Total Configurations</div>
+                            <div class="metric-value">${{filteredMessageRatesByLocation.length}}</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-title">Critical Rate (>1000 msg/s)</div>
+                            <div class="metric-value" style="color: #e74c3c;">${{criticalCount}}</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-title">Warning Rate (100-1000 msg/s)</div>
+                            <div class="metric-value" style="color: #f39c12;">${{warningCount}}</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-title">Normal Rate (<100 msg/s)</div>
+                            <div class="metric-value" style="color: #27ae60;">${{normalCount}}</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-title">Highest Rate</div>
+                            <div class="metric-value">${{Math.max(...allRates).toFixed(1)}} msg/s</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-title">Median Rate</div>
+                            <div class="metric-value">${{allRates.sort((a,b) => a-b)[Math.floor(allRates.length/2)].toFixed(1)}} msg/s</div>
+                        </div>
+                    `;
+                    document.getElementById('rateMetrics').innerHTML = metricsHtml;
+                }}
+            }}
+        }}
+        
+        function drawTestCaseCharts() {{
+            if (testCaseFlipData.length === 0) {{
+                document.getElementById('testCaseFlipCounts').innerHTML = '<p>No test case data available</p>';
+                return;
+            }}
+            
+            // Filter test case flip data
+            const filteredTestFlips = testCaseFlipData.filter(tc => {{
+                const unitFilter = document.getElementById('globalUnitFilter').value;
+                const stationFilter = document.getElementById('globalStationFilter').value;
+                const saveFilter = document.getElementById('globalSaveFilter').value;
+                const testCaseFilter = document.getElementById('globalTestCaseFilter').value;
+                return (!unitFilter || tc.unit_id === unitFilter) &&
+                    (!stationFilter || tc.station === stationFilter) &&
+                    (!saveFilter || tc.save === saveFilter) &&
+                    (!testCaseFilter || tc.test_case_id === testCaseFilter);
+            }});
+            
+            // Group test cases properly
+            const groupedTestCases = groupTestCases(filteredTestFlips);
+            
+            // Sort by total flips and get top 20
+            const topGroups = Object.values(groupedTestCases)
+                .sort((a, b) => b.totalFlips - a.totalFlips)
+                .slice(0, 20);
+            
+            // Test cases with most flips - grouped
+            Plotly.newPlot('testCaseFlipCounts', [{{
+                x: topGroups.map(d => d.baseName),
+                y: topGroups.map(d => d.totalFlips),
+                type: 'bar',
+                marker: {{ color: '#3498db' }},
+                text: topGroups.map(d => `${{d.instances.length}} runs`),
+                hovertemplate: 'Test Case: %{{x}}<br>Total Flips: %{{y}}<br>%{{text}}<extra></extra>'
+            }}], {{
+                margin: {{ t: 10, b: 100, l: 60, r: 20 }},
+                xaxis: {{ title: 'Test Case Group', tickangle: -45 }},
+                yaxis: {{ title: 'Total Bus Flips' }}
+            }});
+            
+            // Bus Flip Distribution Box Plot
+            const distributionData = [];
+            topGroups.forEach(group => {{
+                if (group.instances.length > 1) {{
+                    // Create box plot data for groups with multiple runs
+                    distributionData.push({{
+                        y: group.instances.map(inst => inst.total_bus_flips || 0),
+                        type: 'box',
+                        name: group.baseName,
+                        boxmean: 'sd'
+                    }});
+                }}
+            }});
+            
+            if (distributionData.length > 0) {{
+                Plotly.newPlot('testCaseDistribution', distributionData, {{
+                    margin: {{ t: 10, b: 100, l: 60, r: 20 }},
+                    xaxis: {{ title: 'Test Case Group', tickangle: -45 }},
+                    yaxis: {{ title: 'Bus Flips per Run' }},
+                    showlegend: false
+                }});
+            }} else {{
+                // If no groups with multiple runs, show a different view
+                const singleRuns = topGroups.filter(g => g.instances.length === 1).slice(0, 15);
+                Plotly.newPlot('testCaseDistribution', [{{
+                    x: singleRuns.map(d => d.baseName),
+                    y: singleRuns.map(d => d.totalFlips),
+                    type: 'scatter',
+                    mode: 'markers',
+                    marker: {{ 
+                        size: singleRuns.map(d => Math.sqrt(d.totalFlips) * 2 + 10),
+                        color: singleRuns.map(d => d.uniqueMsgTypes.size),
+                        colorscale: 'Viridis',
+                        showscale: true,
+                        colorbar: {{ title: 'Unique<br>Msg Types' }}
+                    }},
+                    text: singleRuns.map(d => `Locations: ${{d.uniqueLocations.size}}`),
+                    hovertemplate: '%{{x}}<br>Flips: %{{y}}<br>%{{text}}<extra></extra>'
+                }}], {{
+                    margin: {{ t: 10, b: 100, l: 60, r: 60 }},
+                    xaxis: {{ title: 'Test Case', tickangle: -45 }},
+                    yaxis: {{ title: 'Total Bus Flips' }},
+                    title: {{ text: 'Single-Run Test Cases', x: 0 }}
+                }});
+            }}
+            
+            // Populate test case table with grouped data
+            const tableBody = document.getElementById('testCaseTableBody');
+            tableBody.innerHTML = '';
+            
+            Object.values(groupedTestCases)
+                .sort((a, b) => b.totalFlips - a.totalFlips)
+                .slice(0, 100)
+                .forEach(group => {{
+                    const row = tableBody.insertRow();
+                    
+                    // Format time range
+                    let timeRange = 'N/A';
+                    if (group.timeRanges.length > 0) {{
+                        const minTime = Math.min(...group.timeRanges.map(r => r.start));
+                        const maxTime = Math.max(...group.timeRanges.map(r => r.end));
+                        const startDate = new Date(minTime * 1000).toLocaleDateString();
+                        const endDate = new Date(maxTime * 1000).toLocaleDateString();
+                        timeRange = startDate === endDate ? startDate : `${{startDate}} - ${{endDate}}`;
+                    }}
+                    
+                    row.insertCell(0).textContent = group.baseName;
+                    row.insertCell(1).textContent = group.totalFlips;
+                    row.insertCell(2).textContent = group.instances.length;
+                    row.insertCell(3).textContent = group.avgFlipsPerRun;
+                    row.insertCell(4).textContent = group.uniqueMsgTypes.size;
+                    row.insertCell(5).textContent = group.uniqueLocations.size;
+                    row.insertCell(6).textContent = timeRange;
+                }});
+        }}
+        
+        function drawRequirementsCharts() {{
+            if (filteredRequirementsData.length === 0) {{
+                document.getElementById('requirementsChart').innerHTML = '<p>No requirements data available</p>';
+                return;
+            }}
+            
+            // Aggregate by requirement name
+            const reqSummary = {{}};
+            
+            filteredRequirementsData.forEach(r => {{
+                if (!reqSummary[r.requirement_name]) {{
+                    reqSummary[r.requirement_name] = {{
+                        flipCount: 0,
+                        msgTypes: new Set(),
+                        testCases: new Set(),
+                        locations: new Set()
+                    }};
+                }}
+                reqSummary[r.requirement_name].flipCount += r.flip_count;
+                reqSummary[r.requirement_name].msgTypes.add(r.msg_type_affected);
+                reqSummary[r.requirement_name].locations.add(`${{r.unit_id}}/${{r.station}}/${{r.save}}`);
+                
+                if (r.test_case_ids && r.test_case_ids !== 'N/A') {{
+                    const tcIds = r.test_case_ids.toString().split(/[,;\\s]+/);
+                    tcIds.forEach(tc => {{
+                        const trimmed = tc.trim();
+                        if (trimmed && trimmed !== 'N/A') {{
+                            reqSummary[r.requirement_name].testCases.add(trimmed);
+                        }}
+                    }});
+                }}
+            }});
+            
+            const reqData = Object.entries(reqSummary).map(([name, data]) => ({{
+                name: name,
+                flips: data.flipCount,
+                msgTypes: data.msgTypes.size,
+                testCases: data.testCases.size,
+                locations: data.locations.size
+            }})).sort((a, b) => b.flips - a.flips).slice(0, 20);
+            
+            Plotly.newPlot('requirementsChart', [{{
+                x: reqData.map(d => d.name),
+                y: reqData.map(d => d.flips),
+                type: 'bar',
+                marker: {{ color: '#e74c3c' }},
+                text: reqData.map(d => `${{d.testCases}} test cases, ${{d.msgTypes}} msg types`),
+                hovertemplate: '%{{x}}<br>Flips: %{{y}}<br>%{{text}}<extra></extra>'
+            }}], {{
+                margin: {{ t: 10, b: 120, l: 60, r: 20 }},
+                xaxis: {{ title: 'Requirement Name', tickangle: -45 }},
+                yaxis: {{ title: 'Total Bus Flips' }}
+            }});
+            
+            // Populate requirements table
+            const tableBody = document.getElementById('requirementsTableBody');
+            tableBody.innerHTML = '';
+            
+            filteredRequirementsData.slice(0, 100).forEach(r => {{
+                const row = tableBody.insertRow();
+                row.insertCell(0).textContent = r.requirement_name || '';
+                row.insertCell(1).textContent = `${{r.unit_id}}/${{r.station}}/${{r.save}}`;
+                row.insertCell(2).textContent = r.msg_type_affected || '';
+                row.insertCell(3).textContent = r.flip_count || 0;
+                row.insertCell(4).textContent = r.test_cases_affected || '0';
+                row.insertCell(5).textContent = r.test_case_ids || 'None';
+            }});
+        }}
+        
+        function drawDataWordCharts() {{
+            if (filteredDataWordData.length === 0) {{
+                document.getElementById('errorPatternChart').innerHTML = '<p>No data word analysis available</p>';
+                return;
+            }}
+            
+            // Enhanced Error Pattern Analysis
+            const patternCounts = {{}};
+            const patternTypes = {{}};
+            
+            filteredDataWordData.forEach(d => {{
+                if (d.most_common_error && d.most_common_error !== 'N/A') {{
+                    const pattern = `${{d.msg_type}}: ${{d.most_common_error}}`;
+                    if (!patternCounts[pattern]) {{
+                        patternCounts[pattern] = 0;
+                        patternTypes[pattern] = {{
+                            single: 0,
+                            multi: 0
+                        }};
+                    }}
+                    patternCounts[pattern] += d.most_common_count || d.total_issues;
+                    
+                    // Track if this pattern occurs as single or multi-word change
+                    if (d.single_word_changes > d.multi_word_changes) {{
+                        patternTypes[pattern].single += d.single_word_changes;
+                    }} else {{
+                        patternTypes[pattern].multi += d.multi_word_changes;
+                    }}
+                }}
+            }});
+            
+            const topPatterns = Object.entries(patternCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 15);
+            
+            // Create enhanced bar chart with single/multi indicators
+            const patternData = topPatterns.map(([pattern, count]) => {{
+                const types = patternTypes[pattern];
+                const changeType = types.single > types.multi ? 'Single' : 'Multi';
+                const percentage = types.single > types.multi ? 
+                    Math.round((types.single / (types.single + types.multi)) * 100) :
+                    Math.round((types.multi / (types.single + types.multi)) * 100);
+                return {{
+                    pattern: pattern,
+                    count: count,
+                    changeType: changeType,
+                    percentage: percentage
+                }};
+            }});
+            
+            Plotly.newPlot('errorPatternChart', [{{
+                x: patternData.map(p => p.count),
+                y: patternData.map(p => p.pattern),
+                type: 'bar',
+                orientation: 'h',
+                marker: {{
+                    color: patternData.map(p => p.changeType === 'Single' ? '#3498db' : '#e74c3c')
+                }},
+                text: patternData.map(p => `${{p.changeType}} (${{p.percentage}}%)`),
+                hovertemplate: '%{{y}}<br>Frequency: %{{x}}<br>Type: %{{text}}<extra></extra>'
+            }}], {{
+                margin: {{ t: 40, b: 60, l: 200, r: 60 }},
+                xaxis: {{ title: 'Frequency' }},
+                yaxis: {{ title: 'Error Pattern' }},
+                height: 500,
+                title: {{ 
+                    text: 'Legend: Blue = Single-word changes, Red = Multi-word changes',
+                    x: 0.5,
+                    y: 0.99,
+                    xanchor: 'center',
+                    font: {{ size: 12, color: '#7f8c8d' }}
+                }}
+            }});
+            
+            // Calculate metrics
+            const totalIssues = filteredDataWordData.reduce((sum, d) => sum + d.total_issues, 0);
+            const uniqueDataWords = new Set(filteredDataWordData.map(d => d.data_word)).size;
+            const uniqueMsgTypes = new Set(filteredDataWordData.map(d => d.msg_type)).size;
+            
+            let singleWordIssues = 0;
+            let multiWordIssues = 0;
+            let fastestFlip = Infinity;
+            let avgFlipSpeed = 0;
+            let speedCount = 0;
+            
+            filteredDataWordData.forEach(d => {{
+                singleWordIssues += d.single_word_changes || 0;
+                multiWordIssues += d.multi_word_changes || 0;
+                if (d.avg_flip_speed_ms && d.avg_flip_speed_ms > 0) {{
+                    fastestFlip = Math.min(fastestFlip, d.avg_flip_speed_ms);
+                    avgFlipSpeed += d.avg_flip_speed_ms;
+                    speedCount++;
+                }}
+            }});
+            
+            avgFlipSpeed = speedCount > 0 ? (avgFlipSpeed / speedCount) : 0;
+            const multiWordPercent = (singleWordIssues + multiWordIssues) > 0 ? 
+                ((multiWordIssues / (singleWordIssues + multiWordIssues)) * 100) : 0;
+            
+            const metricsHtml = `
+                <div class="metric-card">
+                    <div class="metric-title">Total Data Word Issues</div>
+                    <div class="metric-value">${{totalIssues.toLocaleString()}}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Unique Data Words</div>
+                    <div class="metric-value">${{uniqueDataWords}}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Affected Message Types</div>
+                    <div class="metric-value">${{uniqueMsgTypes}}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Multi-Word Changes</div>
+                    <div class="metric-value" style="color: #e74c3c;">${{multiWordPercent.toFixed(1)}}%</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Fastest Flip Speed</div>
+                    <div class="metric-value">${{fastestFlip === Infinity ? 'N/A' : fastestFlip.toFixed(3) + 'ms'}}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Avg Flip Speed</div>
+                    <div class="metric-value">${{avgFlipSpeed > 0 ? avgFlipSpeed.toFixed(3) + 'ms' : 'N/A'}}</div>
+                </div>
+            `;
+            document.getElementById('dataWordMetrics').innerHTML = metricsHtml;
+            
+            // Populate data word table
+            const tableBody = document.getElementById('dataWordTableBody');
+            tableBody.innerHTML = '';
+            
+            filteredDataWordData.slice(0, 50).forEach(d => {{
+                const row = tableBody.insertRow();
+                const singleMulti = (d.single_word_changes || 0) > (d.multi_word_changes || 0) ? 'Single' : 'Multi';
+                const locations = `${{d.affected_units || 0}}U/${{d.affected_stations || 0}}S/${{d.affected_saves || 0}}S`;
+                
+                row.insertCell(0).textContent = d.msg_type || '';
+                row.insertCell(1).textContent = d.data_word || '';
+                row.insertCell(2).textContent = d.total_issues || 0;
+                row.insertCell(3).textContent = singleMulti;
+                row.insertCell(4).textContent = d.most_common_error || 'N/A';
+                row.insertCell(5).textContent = d.avg_flip_speed_ms ? d.avg_flip_speed_ms.toFixed(3) : 'N/A';
+                row.insertCell(6).textContent = locations;
+            }});
+        }}
+        
+        function sortTable(tableId, column) {{
+            const table = document.getElementById(tableId);
+            const tbody = table.querySelector('tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            
+            rows.sort((a, b) => {{
+                const aVal = a.cells[column].textContent;
+                const bVal = b.cells[column].textContent;
+                
+                // Try to parse as number first
+                const aNum = parseFloat(aVal);
+                const bNum = parseFloat(bVal);
+                
+                if (!isNaN(aNum) && !isNaN(bNum)) {{
+                    return bNum - aNum; // Descending for numbers
+                }}
+                
+                return aVal.localeCompare(bVal);
+            }});
+            
+            // Re-append sorted rows
+            rows.forEach(row => tbody.appendChild(row));
+        }}
+        
+        // Initialize on page load
+        initializeFilters();
+        updateStats();
+        updateFilteredCount();
+        drawAllCharts();
+    </script>
+</body>
+</html>
+"""
+    
+    with open(dashboard_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    print(f"\nEnhanced interactive dashboard saved to: {dashboard_path.absolute()}")
+    return dashboard_path
+
 
