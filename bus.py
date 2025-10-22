@@ -2400,6 +2400,23 @@ def create_interactive_dashboard(self):
             <!-- Data Words Tab -->
             <div id="datawords-tab" class="tab-content">
                 <div class="chart-container">
+                    <div class="chart-title">Single vs Multi-Word Change Distribution</div>
+                    <div class="info-box">
+                        <strong>Change Types:</strong> Shows the distribution of single-word vs multi-word changes across message types.
+                        Multi-word changes often indicate more severe issues.
+                    </div>
+                    <div id="singleVsMultiChart"></div>
+                </div>
+                
+                <div class="chart-container">
+                    <div class="chart-title">Multi-Word Change Patterns</div>
+                    <div class="info-box">
+                        <strong>Pattern Analysis:</strong> Shows which data words commonly change together in multi-word scenarios.
+                    </div>
+                    <div id="multiWordPatternChart"></div>
+                </div>
+                
+                <div class="chart-container">
                     <div class="chart-title">Error Pattern Analysis (Enhanced)</div>
                     <div class="info-box">
                         <strong>Common Patterns:</strong> Shows the most frequent error patterns with single/multi-word change indicators.
@@ -2409,8 +2426,37 @@ def create_interactive_dashboard(self):
                 </div>
                 
                 <div class="chart-container">
+                    <div class="chart-title">Data Word Change Speed Analysis</div>
+                    <div class="info-box">
+                        <strong>Timing Analysis:</strong> Shows the relationship between flip speed and change type.
+                    </div>
+                    <div id="changeSpeedChart"></div>
+                </div>
+                
+                <div class="chart-container">
                     <div class="chart-title">Data Word Statistics</div>
                     <div class="metric-grid" id="dataWordMetrics"></div>
+                </div>
+                
+                <div class="chart-container">
+                    <div class="chart-title">Interactive Data Word Pivot Table</div>
+                    <div style="overflow-x: auto;">
+                        <table id="dataWordPivotTable" class="data-table">
+                            <thead>
+                                <tr>
+                                    <th onclick="sortPivotTable(0)">Message Type</th>
+                                    <th onclick="sortPivotTable(1)">Total Issues</th>
+                                    <th onclick="sortPivotTable(2)">Single Word</th>
+                                    <th onclick="sortPivotTable(3)">Multi Word</th>
+                                    <th onclick="sortPivotTable(4)">% Multi</th>
+                                    <th onclick="sortPivotTable(5)">Avg Words/Change</th>
+                                    <th onclick="sortPivotTable(6)">Unique Patterns</th>
+                                    <th onclick="sortPivotTable(7)">Top Pattern</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dataWordPivotBody"></tbody>
+                        </table>
+                    </div>
                 </div>
                 
                 <div class="chart-container">
@@ -2462,7 +2508,7 @@ def create_interactive_dashboard(self):
         const uniqueMsgTypes = {msg_types_json};
         const uniqueTestCases = {test_case_ids_json};
         
-        // Helper function to parse test case names
+        // Helper function to parse test case names and handle deduplication
         function parseTestCaseName(testCaseId) {{
             // Handle combined test cases like "QS_2000_02&TW104_01"
             if (testCaseId.includes('&')) {{
@@ -2480,6 +2526,7 @@ def create_interactive_dashboard(self):
         
         function groupTestCases(testCases) {{
             const grouped = {{}};
+            const processedTimeRanges = new Set();
             
             testCases.forEach(tc => {{
                 const baseNames = parseTestCaseName(tc.test_case_id);
@@ -2491,10 +2538,53 @@ def create_interactive_dashboard(self):
                             totalFlips: 0,
                             uniqueMsgTypes: new Set(),
                             uniqueLocations: new Set(),
-                            timeRanges: []
+                            timeRanges: [],
+                            uniqueRuns: 0
                         }};
                     }}
-                    grouped[baseName].instances.push(tc);
+                    
+                    // Create a unique identifier for this test case instance
+                    const timeRangeKey = `${{tc.unit_id}}-${{tc.station}}-${{tc.save}}-${{tc.timestamp_start}}-${{tc.timestamp_end}}`;
+                    
+                    // Only add if this exact time range hasn't been processed for this group
+                    if (!processedTimeRanges.has(`${{baseName}}-${{timeRangeKey}}`)) {{
+                        processedTimeRanges.add(`${{baseName}}-${{timeRangeKey}}`);
+                        grouped[baseName].instances.push(tc);
+                        
+                        // Track unique time ranges (not overlapping)
+                        const location = `${{tc.unit_id}}/${{tc.station}}/${{tc.save}}`;
+                        let isOverlapping = false;
+                        
+                        if (tc.timestamp_start && tc.timestamp_end) {{
+                            const start = parseFloat(tc.timestamp_start);
+                            const end = parseFloat(tc.timestamp_end);
+                            
+                            // Check if this overlaps with existing time ranges for same location
+                            for (let range of grouped[baseName].timeRanges) {{
+                                if (range.location === location) {{
+                                    // Check for overlap
+                                    if ((start >= range.start && start <= range.end) ||
+                                        (end >= range.start && end <= range.end) ||
+                                        (start <= range.start && end >= range.end)) {{
+                                        // Merge overlapping ranges
+                                        range.start = Math.min(range.start, start);
+                                        range.end = Math.max(range.end, end);
+                                        isOverlapping = true;
+                                        break;
+                                    }}
+                                }}
+                            }}
+                            
+                            if (!isOverlapping) {{
+                                grouped[baseName].timeRanges.push({{
+                                    start: start,
+                                    end: end,
+                                    location: location
+                                }});
+                                grouped[baseName].uniqueRuns++;
+                            }}
+                        }}
+                    }}
                 }});
             }});
             
@@ -2514,20 +2604,11 @@ def create_interactive_dashboard(self):
                     // Collect unique locations
                     const location = `${{instance.unit_id}}/${{instance.station}}/${{instance.save}}`;
                     group.uniqueLocations.add(location);
-                    
-                    // Collect time ranges
-                    if (instance.timestamp_start && instance.timestamp_end) {{
-                        group.timeRanges.push({{
-                            start: parseFloat(instance.timestamp_start),
-                            end: parseFloat(instance.timestamp_end),
-                            location: location
-                        }});
-                    }}
                 }});
                 
-                // Calculate average flips per run
-                group.avgFlipsPerRun = group.instances.length > 0 ? 
-                    Math.round(group.totalFlips / group.instances.length) : 0;
+                // Calculate average flips per unique run (not per instance)
+                group.avgFlipsPerRun = group.uniqueRuns > 0 ? 
+                    Math.round(group.totalFlips / group.uniqueRuns) : 0;
             }});
             
             return grouped;
@@ -3081,61 +3162,103 @@ def create_interactive_dashboard(self):
         }}
         
         function drawMessageRateCharts() {{
-            // Message Rate Statistics by Type - with filtering support
-            if (filteredMessageRatesData.length > 0) {{
-                // Convert to sampling rate in Hertz (Hz = 1000/ms)
-                const sortedByRate = [...filteredMessageRatesData]
-                    .filter(d => d.avg_time_diff_ms)
-                    .map(d => {{
-                        return {{
-                            ...d,
-                            avg_hz: 1000 / d.avg_time_diff_ms,
-                            min_hz: 1000 / d.max_time_diff_ms,  // min Hz = 1000/max time
-                            max_hz: 1000 / d.min_time_diff_ms   // max Hz = 1000/min time
+            // Message Rate Statistics - properly filtered
+            if (filteredMessageRatesByLocation.length > 0) {{
+                // Aggregate filtered data by message type
+                const msgTypeStats = {{}};
+                filteredMessageRatesByLocation.forEach(d => {{
+                    if (!msgTypeStats[d.msg_type]) {{
+                        msgTypeStats[d.msg_type] = {{
+                            rates_hz: [],
+                            times_ms: []
                         }};
-                    }})
-                    .sort((a, b) => b.avg_hz - a.avg_hz)
-                    .slice(0, 20);
-                
-                Plotly.newPlot('messageRateStats', [{{
-                    x: sortedByRate.map(d => d.msg_type),
-                    y: sortedByRate.map(d => d.avg_hz),
-                    error_y: {{
-                        type: 'data',
-                        symmetric: false,
-                        array: sortedByRate.map(d => d.max_hz - d.avg_hz),
-                        arrayminus: sortedByRate.map(d => d.avg_hz - d.min_hz)
-                    }},
-                    type: 'bar',
-                    marker: {{
-                        color: sortedByRate.map(d => 
-                            d.avg_hz > 1000 ? '#e74c3c' :   // >1kHz critical
-                            d.avg_hz > 100 ? '#f39c12' :    // >100Hz warning
-                            '#3498db'                        // normal
-                        )
-                    }},
-                    text: sortedByRate.map(d => `${{d.avg_hz.toFixed(1)}} Hz`),
-                    textposition: 'auto',
-                    hovertemplate: 'Msg Type: %{{x}}<br>Avg Sampling Rate: %{{y:.1f}} Hz<br>Period: %{{customdata:.3f}}ms<extra></extra>',
-                    customdata: sortedByRate.map(d => d.avg_time_diff_ms)
-                }}], {{
-                    margin: {{ t: 10, b: 100, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Message Type', tickangle: -45 }},
-                    yaxis: {{ title: 'Sampling Rate (Hz)', type: 'log' }},
-                    annotations: [
-                        {{
-                            x: 0.5,
-                            y: 1,
-                            xref: 'paper',
-                            yref: 'paper',
-                            text: 'Sampling frequency in Hertz (samples/second)',
-                            showarrow: false,
-                            font: {{ size: 12, color: '#7f8c8d' }}
+                    }}
+                    if (d.avg_time_diff_ms > 0) {{
+                        msgTypeStats[d.msg_type].rates_hz.push(1000 / d.avg_time_diff_ms);
+                        msgTypeStats[d.msg_type].times_ms.push(d.avg_time_diff_ms);
+                        
+                        // Add min/max for box plot
+                        if (d.min_time_diff_ms > 0) {{
+                            msgTypeStats[d.msg_type].rates_hz.push(1000 / d.min_time_diff_ms);
                         }}
-                    ]
+                        if (d.max_time_diff_ms > 0) {{
+                            msgTypeStats[d.msg_type].rates_hz.push(1000 / d.max_time_diff_ms);
+                        }}
+                    }}
                 }});
+                
+                // Create box plot data for top message types
+                const boxData = [];
+                const barData = [];
+                
+                Object.entries(msgTypeStats).forEach(([msgType, stats]) => {{
+                    if (stats.rates_hz.length > 0) {{
+                        const avgHz = stats.rates_hz.reduce((a, b) => a + b, 0) / stats.rates_hz.length;
+                        barData.push({{
+                            msgType: msgType,
+                            avgHz: avgHz,
+                            minHz: Math.min(...stats.rates_hz),
+                            maxHz: Math.max(...stats.rates_hz),
+                            q1Hz: stats.rates_hz.sort((a, b) => a - b)[Math.floor(stats.rates_hz.length * 0.25)],
+                            q3Hz: stats.rates_hz.sort((a, b) => a - b)[Math.floor(stats.rates_hz.length * 0.75)],
+                            medianHz: stats.rates_hz.sort((a, b) => a - b)[Math.floor(stats.rates_hz.length * 0.5)]
+                        }});
+                    }}
+                }});
+                
+                // Sort and get top 20
+                const topTypes = barData.sort((a, b) => b.avgHz - a.avgHz).slice(0, 20);
+                
+                // Create box plot traces
+                topTypes.forEach(type => {{
+                    boxData.push({{
+                        y: msgTypeStats[type.msgType].rates_hz,
+                        type: 'box',
+                        name: type.msgType,
+                        boxmean: true,
+                        marker: {{
+                            color: type.avgHz > 1000 ? '#e74c3c' :
+                                  type.avgHz > 100 ? '#f39c12' : '#3498db'
+                        }}
+                    }});
+                }});
+                
+                if (boxData.length > 5) {{
+                    // Use box plot for many message types
+                    Plotly.newPlot('messageRateStats', boxData, {{
+                        margin: {{ t: 10, b: 100, l: 60, r: 20 }},
+                        xaxis: {{ title: 'Message Type', tickangle: -45 }},
+                        yaxis: {{ title: 'Sampling Rate (Hz)', type: 'log' }},
+                        showlegend: false
+                    }});
+                }} else {{
+                    // Use bar chart with error bars for few message types
+                    Plotly.newPlot('messageRateStats', [{{
+                        x: topTypes.map(d => d.msgType),
+                        y: topTypes.map(d => d.avgHz),
+                        error_y: {{
+                            type: 'data',
+                            symmetric: false,
+                            array: topTypes.map(d => d.maxHz - d.avgHz),
+                            arrayminus: topTypes.map(d => d.avgHz - d.minHz)
+                        }},
+                        type: 'bar',
+                        marker: {{
+                            color: topTypes.map(d => 
+                                d.avgHz > 1000 ? '#e74c3c' :
+                                d.avgHz > 100 ? '#f39c12' : '#3498db'
+                            )
+                        }},
+                        text: topTypes.map(d => `${{d.avgHz.toFixed(1)}} Hz`),
+                        textposition: 'auto'
+                    }}], {{
+                        margin: {{ t: 10, b: 100, l: 60, r: 20 }},
+                        xaxis: {{ title: 'Message Type', tickangle: -45 }},
+                        yaxis: {{ title: 'Sampling Rate (Hz)', type: 'log' }}
+                    }});
+                }}
             }} else {{
-                document.getElementById('messageRateStats').innerHTML = '<p>No message rate data available</p>';
+                document.getElementById('messageRateStats').innerHTML = '<p>No message rate data available for current filter</p>';
             }}
             
             // Station Rate Summary - Proper aggregation
@@ -3489,8 +3612,95 @@ def create_interactive_dashboard(self):
         
         function drawDataWordCharts() {{
             if (filteredDataWordData.length === 0) {{
-                document.getElementById('errorPatternChart').innerHTML = '<p>No data word analysis available</p>';
+                document.getElementById('singleVsMultiChart').innerHTML = '<p>No data word analysis available</p>';
                 return;
+            }}
+            
+            // Single vs Multi-Word Change Distribution
+            const singleMultiData = {{}};
+            filteredDataWordData.forEach(d => {{
+                if (!singleMultiData[d.msg_type]) {{
+                    singleMultiData[d.msg_type] = {{
+                        single: 0,
+                        multi: 0,
+                        total: 0
+                    }};
+                }}
+                singleMultiData[d.msg_type].single += d.single_word_changes || 0;
+                singleMultiData[d.msg_type].multi += d.multi_word_changes || 0;
+                singleMultiData[d.msg_type].total += d.total_issues || 0;
+            }});
+            
+            const msgTypes = Object.keys(singleMultiData).sort((a, b) => 
+                singleMultiData[b].total - singleMultiData[a].total
+            ).slice(0, 15);
+            
+            Plotly.newPlot('singleVsMultiChart', [{{
+                x: msgTypes,
+                y: msgTypes.map(mt => singleMultiData[mt].single),
+                name: 'Single Word Changes',
+                type: 'bar',
+                marker: {{ color: '#3498db' }}
+            }}, {{
+                x: msgTypes,
+                y: msgTypes.map(mt => singleMultiData[mt].multi),
+                name: 'Multi Word Changes',
+                type: 'bar',
+                marker: {{ color: '#e74c3c' }}
+            }}], {{
+                barmode: 'stack',
+                margin: {{ t: 10, b: 100, l: 60, r: 20 }},
+                xaxis: {{ title: 'Message Type', tickangle: -45 }},
+                yaxis: {{ title: 'Number of Changes' }},
+                hovermode: 'x unified'
+            }});
+            
+            // Multi-Word Change Patterns - Heatmap
+            const multiWordPatterns = {{}};
+            filteredDataWordData.forEach(d => {{
+                if (d.multi_word_changes > 0 && d.data_word) {{
+                    if (!multiWordPatterns[d.msg_type]) {{
+                        multiWordPatterns[d.msg_type] = {{}};
+                    }}
+                    if (!multiWordPatterns[d.msg_type][d.data_word]) {{
+                        multiWordPatterns[d.msg_type][d.data_word] = 0;
+                    }}
+                    multiWordPatterns[d.msg_type][d.data_word] += d.multi_word_changes;
+                }}
+            }});
+            
+            // Create heatmap data
+            const heatmapMsgTypes = Object.keys(multiWordPatterns).slice(0, 10);
+            const allDataWords = new Set();
+            Object.values(multiWordPatterns).forEach(dw => {{
+                Object.keys(dw).forEach(word => allDataWords.add(word));
+            }});
+            const heatmapDataWords = Array.from(allDataWords).slice(0, 15);
+            
+            const zValues = [];
+            heatmapMsgTypes.forEach(mt => {{
+                const row = [];
+                heatmapDataWords.forEach(dw => {{
+                    row.push(multiWordPatterns[mt]?.[dw] || 0);
+                }});
+                zValues.push(row);
+            }});
+            
+            if (zValues.length > 0 && zValues[0].length > 0) {{
+                Plotly.newPlot('multiWordPatternChart', [{{
+                    z: zValues,
+                    x: heatmapDataWords,
+                    y: heatmapMsgTypes,
+                    type: 'heatmap',
+                    colorscale: 'Viridis',
+                    hovertemplate: 'Msg Type: %{{y}}<br>Data Word: %{{x}}<br>Multi Changes: %{{z}}<extra></extra>'
+                }}], {{
+                    margin: {{ t: 10, b: 100, l: 100, r: 40 }},
+                    xaxis: {{ title: 'Data Word', tickangle: -45 }},
+                    yaxis: {{ title: 'Message Type' }}
+                }});
+            }} else {{
+                document.getElementById('multiWordPatternChart').innerHTML = '<p>No multi-word patterns found</p>';
             }}
             
             // Enhanced Error Pattern Analysis
@@ -3553,13 +3763,59 @@ def create_interactive_dashboard(self):
                 yaxis: {{ title: 'Error Pattern' }},
                 height: 500,
                 title: {{ 
-                    text: 'Legend: Blue = Single-word changes, Red = Multi-word changes',
+                    text: 'Blue = Single-word, Red = Multi-word',
                     x: 0.5,
                     y: 0.99,
                     xanchor: 'center',
                     font: {{ size: 12, color: '#7f8c8d' }}
                 }}
             }});
+            
+            // Change Speed Analysis
+            const speedData = {{
+                single: [],
+                multi: []
+            }};
+            
+            filteredDataWordData.forEach(d => {{
+                if (d.avg_flip_speed_ms && d.avg_flip_speed_ms > 0) {{
+                    if (d.single_word_changes > d.multi_word_changes) {{
+                        speedData.single.push(d.avg_flip_speed_ms);
+                    }} else if (d.multi_word_changes > 0) {{
+                        speedData.multi.push(d.avg_flip_speed_ms);
+                    }}
+                }}
+            }});
+            
+            const traces = [];
+            if (speedData.single.length > 0) {{
+                traces.push({{
+                    y: speedData.single,
+                    type: 'box',
+                    name: 'Single Word Changes',
+                    marker: {{ color: '#3498db' }},
+                    boxmean: true
+                }});
+            }}
+            if (speedData.multi.length > 0) {{
+                traces.push({{
+                    y: speedData.multi,
+                    type: 'box',
+                    name: 'Multi Word Changes',
+                    marker: {{ color: '#e74c3c' }},
+                    boxmean: true
+                }});
+            }}
+            
+            if (traces.length > 0) {{
+                Plotly.newPlot('changeSpeedChart', traces, {{
+                    margin: {{ t: 10, b: 60, l: 60, r: 20 }},
+                    yaxis: {{ title: 'Flip Speed (ms)', type: 'log' }},
+                    showlegend: true
+                }});
+            }} else {{
+                document.getElementById('changeSpeedChart').innerHTML = '<p>No speed data available</p>';
+            }}
             
             // Calculate metrics
             const totalIssues = filteredDataWordData.reduce((sum, d) => sum + d.total_issues, 0);
@@ -3592,6 +3848,18 @@ def create_interactive_dashboard(self):
                     <div class="metric-value">${{totalIssues.toLocaleString()}}</div>
                 </div>
                 <div class="metric-card">
+                    <div class="metric-title">Single Word Changes</div>
+                    <div class="metric-value" style="color: #3498db;">${{singleWordIssues.toLocaleString()}}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Multi Word Changes</div>
+                    <div class="metric-value" style="color: #e74c3c;">${{multiWordIssues.toLocaleString()}}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Multi-Word Percentage</div>
+                    <div class="metric-value">${{multiWordPercent.toFixed(1)}}%</div>
+                </div>
+                <div class="metric-card">
                     <div class="metric-title">Unique Data Words</div>
                     <div class="metric-value">${{uniqueDataWords}}</div>
                 </div>
@@ -3599,20 +3867,60 @@ def create_interactive_dashboard(self):
                     <div class="metric-title">Affected Message Types</div>
                     <div class="metric-value">${{uniqueMsgTypes}}</div>
                 </div>
-                <div class="metric-card">
-                    <div class="metric-title">Multi-Word Changes</div>
-                    <div class="metric-value" style="color: #e74c3c;">${{multiWordPercent.toFixed(1)}}%</div>
-                </div>
-                <div class="metric-card">
-                    <div class="metric-title">Fastest Flip Speed</div>
-                    <div class="metric-value">${{fastestFlip === Infinity ? 'N/A' : fastestFlip.toFixed(3) + 'ms'}}</div>
-                </div>
-                <div class="metric-card">
-                    <div class="metric-title">Avg Flip Speed</div>
-                    <div class="metric-value">${{avgFlipSpeed > 0 ? avgFlipSpeed.toFixed(3) + 'ms' : 'N/A'}}</div>
-                </div>
             `;
             document.getElementById('dataWordMetrics').innerHTML = metricsHtml;
+            
+            // Populate interactive pivot table
+            const pivotData = {{}};
+            filteredDataWordData.forEach(d => {{
+                if (!pivotData[d.msg_type]) {{
+                    pivotData[d.msg_type] = {{
+                        total: 0,
+                        single: 0,
+                        multi: 0,
+                        patterns: new Set(),
+                        topPattern: '',
+                        topPatternCount: 0,
+                        wordCounts: []
+                    }};
+                }}
+                pivotData[d.msg_type].total += d.total_issues || 0;
+                pivotData[d.msg_type].single += d.single_word_changes || 0;
+                pivotData[d.msg_type].multi += d.multi_word_changes || 0;
+                
+                if (d.most_common_error && d.most_common_error !== 'N/A') {{
+                    pivotData[d.msg_type].patterns.add(d.most_common_error);
+                    if ((d.most_common_count || 0) > pivotData[d.msg_type].topPatternCount) {{
+                        pivotData[d.msg_type].topPattern = d.most_common_error;
+                        pivotData[d.msg_type].topPatternCount = d.most_common_count || 0;
+                    }}
+                }}
+                
+                if (d.num_data_changes) {{
+                    pivotData[d.msg_type].wordCounts.push(d.num_data_changes);
+                }}
+            }});
+            
+            const pivotBody = document.getElementById('dataWordPivotBody');
+            pivotBody.innerHTML = '';
+            
+            Object.entries(pivotData)
+                .sort((a, b) => b[1].total - a[1].total)
+                .forEach(([msgType, data]) => {{
+                    const row = pivotBody.insertRow();
+                    const multiPercent = data.total > 0 ? (data.multi / data.total * 100).toFixed(1) : '0.0';
+                    const avgWords = data.wordCounts.length > 0 ? 
+                        (data.wordCounts.reduce((a, b) => a + b, 0) / data.wordCounts.length).toFixed(2) : 'N/A';
+                    
+                    row.insertCell(0).textContent = msgType;
+                    row.insertCell(1).textContent = data.total;
+                    row.insertCell(2).textContent = data.single;
+                    row.insertCell(3).textContent = data.multi;
+                    row.insertCell(4).textContent = multiPercent + '%';
+                    row.insertCell(5).textContent = avgWords;
+                    row.insertCell(6).textContent = data.patterns.size;
+                    row.insertCell(7).textContent = data.topPattern || 'N/A';
+                }});
             
             // Populate data word table
             const tableBody = document.getElementById('dataWordTableBody');
@@ -3631,6 +3939,36 @@ def create_interactive_dashboard(self):
                 row.insertCell(5).textContent = d.avg_flip_speed_ms ? d.avg_flip_speed_ms.toFixed(3) : 'N/A';
                 row.insertCell(6).textContent = locations;
             }});
+        }}
+        
+        function sortPivotTable(column) {{
+            const table = document.getElementById('dataWordPivotTable');
+            const tbody = table.querySelector('tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            
+            rows.sort((a, b) => {{
+                const aVal = a.cells[column].textContent;
+                const bVal = b.cells[column].textContent;
+                
+                // Handle percentages
+                if (aVal.includes('%') && bVal.includes('%')) {{
+                    const aNum = parseFloat(aVal.replace('%', ''));
+                    const bNum = parseFloat(bVal.replace('%', ''));
+                    return bNum - aNum;
+                }}
+                
+                // Try to parse as number
+                const aNum = parseFloat(aVal);
+                const bNum = parseFloat(bVal);
+                
+                if (!isNaN(aNum) && !isNaN(bNum)) {{
+                    return bNum - aNum;
+                }}
+                
+                return aVal.localeCompare(bVal);
+            }});
+            
+            rows.forEach(row => tbody.appendChild(row));
         }}
         
         function sortTable(tableId, column) {{
@@ -3672,5 +4010,3 @@ def create_interactive_dashboard(self):
     
     print(f"\nEnhanced interactive dashboard saved to: {dashboard_path.absolute()}")
     return dashboard_path
-
-
