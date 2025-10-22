@@ -1842,7 +1842,7 @@ class StreamlinedBusMonitorDashboard:
         print(f"\nExcel file saved to: {excel_path.absolute()}")
         return excel_path
 
- def create_interactive_dashboard(self):
+def create_interactive_dashboard(self):
         """Create an enhanced interactive HTML dashboard with comprehensive filters and analytics"""
         import json
         from datetime import datetime
@@ -2275,12 +2275,12 @@ class StreamlinedBusMonitorDashboard:
                     </div>
                     
                     <div class="chart-container">
-                        <div class="chart-title">Test Cases Over Time</div>
+                        <div class="chart-title">Test Case Execution Summary</div>
                         <div class="info-box">
-                            <strong>Test Case Timeline:</strong> Shows when test cases were executed and their duration.
-                            Orange bars indicate test cases that had bus flips.
+                            <strong>Test Case Summary:</strong> Shows test cases with their execution details and coverage.
+                            Sorted by duration and colored by bus flip presence.
                         </div>
-                        <div id="testCaseTimeline"></div>
+                        <div id="testCaseSummaryTable"></div>
                     </div>
                     
                     <div class="chart-container">
@@ -2392,36 +2392,41 @@ class StreamlinedBusMonitorDashboard:
                 <!-- Data Words Tab -->
                 <div id="datawords-tab" class="tab-content">
                     <div class="chart-container">
-                        <div class="chart-title">Top Data Words with Errors</div>
+                        <div class="chart-title">Data Word Impact Analysis</div>
                         <div class="info-box">
-                            <strong>Data Word Analysis:</strong> Shows which data words have the most issues.
-                            Each bar represents a unique message type and data word combination.
+                            <strong>Impact Matrix:</strong> Shows which data words are most problematic across message types.
+                            Bubble size indicates frequency, color indicates affected locations.
                         </div>
-                        <div id="dataWordTopIssues"></div>
+                        <div id="dataWordImpactMatrix"></div>
                     </div>
                     
                     <div class="chart-container">
-                        <div class="chart-title">Data Word Error Distribution by Message Type</div>
-                        <div id="dataWordByMsgType"></div>
+                        <div class="chart-title">Error Pattern Analysis</div>
+                        <div class="info-box">
+                            <strong>Common Patterns:</strong> Shows the most frequent error patterns (before → after values).
+                            Helps identify systematic issues.
+                        </div>
+                        <div id="errorPatternChart"></div>
                     </div>
                     
                     <div class="chart-container">
-                        <div class="chart-title">Single vs Multi-Word Changes</div>
-                        <div id="singleVsMultiWord"></div>
+                        <div class="chart-title">Data Word Statistics</div>
+                        <div class="metric-grid" id="dataWordMetrics"></div>
                     </div>
                     
                     <div class="chart-container">
-                        <div class="chart-title">Data Word Detail Table</div>
+                        <div class="chart-title">Detailed Data Word Analysis</div>
                         <div style="overflow-x: auto;">
                             <table id="dataWordTable" class="data-table">
                                 <thead>
                                     <tr>
-                                        <th>Message Type</th>
-                                        <th>Data Word</th>
-                                        <th>Total Issues</th>
-                                        <th>Issue %</th>
-                                        <th>Most Common Error</th>
-                                        <th>Affected Units</th>
+                                        <th onclick="sortTable('dataWordTable', 0)">Message Type</th>
+                                        <th onclick="sortTable('dataWordTable', 1)">Data Word</th>
+                                        <th onclick="sortTable('dataWordTable', 2)">Total Issues</th>
+                                        <th onclick="sortTable('dataWordTable', 3)">Single/Multi</th>
+                                        <th onclick="sortTable('dataWordTable', 4)">Common Pattern</th>
+                                        <th onclick="sortTable('dataWordTable', 5)">Avg Speed (ms)</th>
+                                        <th onclick="sortTable('dataWordTable', 6)">Locations</th>
                                     </tr>
                                 </thead>
                                 <tbody id="dataWordTableBody"></tbody>
@@ -2857,56 +2862,94 @@ class StreamlinedBusMonitorDashboard:
                     yaxis: {{ title: 'Bus Flips per Hour' }}
                 }});
                 
-                // Test Case Timeline
+                // Test Case Summary Table instead of timeline
                 if (filteredTestCaseData.length > 0) {{
-                    // Prepare test case timeline data
-                    const testCaseTimelineData = [];
+                    // Group test cases by test_case_id to get summary
+                    const testCaseSummary = {{}};
                     
-                    filteredTestCaseData.forEach((tc, index) => {{
-                        const startTime = parseFloat(tc.timestamp_start);
-                        const endTime = parseFloat(tc.timestamp_end || tc.timestamp_start);
-                        const duration = endTime - startTime;
+                    filteredTestCaseData.forEach(tc => {{
+                        if (!testCaseSummary[tc.test_case_id]) {{
+                            testCaseSummary[tc.test_case_id] = {{
+                                startTime: parseFloat(tc.timestamp_start),
+                                endTime: parseFloat(tc.timestamp_end || tc.timestamp_start),
+                                units: new Set(),
+                                stations: new Set(),
+                                saves: new Set(),
+                                hasFlips: false,
+                                flipCount: 0
+                            }};
+                        }}
+                        
+                        const summary = testCaseSummary[tc.test_case_id];
+                        summary.startTime = Math.min(summary.startTime, parseFloat(tc.timestamp_start));
+                        summary.endTime = Math.max(summary.endTime, parseFloat(tc.timestamp_end || tc.timestamp_start));
+                        summary.units.add(tc.unit_id);
+                        summary.stations.add(tc.station);
+                        summary.saves.add(tc.save);
                         
                         // Check if this test case had bus flips
-                        const hasFlips = testCaseFlipData.some(tf => 
+                        const flips = testCaseFlipData.find(tf => 
                             tf.test_case_id === tc.test_case_id &&
                             tf.unit_id === tc.unit_id &&
                             tf.station === tc.station &&
-                            tf.save === tc.save &&
-                            tf.total_bus_flips > 0
+                            tf.save === tc.save
                         );
                         
-                        testCaseTimelineData.push({{
-                            x: [new Date(startTime * 1000), new Date(endTime * 1000)],
-                            y: [index, index],
-                            mode: 'lines',
-                            type: 'scatter',
-                            line: {{
-                                color: hasFlips ? '#e74c3c' : '#3498db',
-                                width: 10
-                            }},
-                            name: tc.test_case_id,
-                            hovertemplate: `Test Case: ${{tc.test_case_id}}<br>` +
-                                        `Location: ${{tc.unit_id}}-${{tc.station}}-${{tc.save}}<br>` +
-                                        `Duration: ${{duration.toFixed(2)}}s<br>` +
-                                        `Has Flips: ${{hasFlips ? 'Yes' : 'No'}}<extra></extra>`
-                        }});
+                        if (flips && flips.total_bus_flips > 0) {{
+                            summary.hasFlips = true;
+                            summary.flipCount += flips.total_bus_flips;
+                        }}
                     }});
                     
-                    Plotly.newPlot('testCaseTimeline', testCaseTimelineData, {{
-                        margin: {{ t: 10, b: 100, l: 150, r: 20 }},
-                        xaxis: {{ title: 'Time', type: 'date' }},
-                        yaxis: {{ 
-                            title: 'Test Cases',
-                            tickmode: 'array',
-                            tickvals: Array.from({{length: filteredTestCaseData.length}}, (_, i) => i),
-                            ticktext: filteredTestCaseData.map(tc => tc.test_case_id)
-                        }},
-                        showlegend: false,
-                        height: Math.max(400, filteredTestCaseData.length * 20)
+                    // Convert to array for display
+                    const summaryData = Object.entries(testCaseSummary).map(([id, data]) => ({{
+                        testCaseId: id,
+                        duration: (data.endTime - data.startTime).toFixed(2),
+                        startTime: new Date(data.startTime * 1000).toLocaleString(),
+                        unitCount: data.units.size,
+                        stationCount: data.stations.size,
+                        saveCount: data.saves.size,
+                        hasFlips: data.hasFlips,
+                        flipCount: data.flipCount
+                    }})).sort((a, b) => b.duration - a.duration);
+                    
+                    // Create HTML table
+                    let tableHtml = `
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Test Case ID</th>
+                                    <th>Start Time</th>
+                                    <th>Duration (s)</th>
+                                    <th>Units</th>
+                                    <th>Stations</th>
+                                    <th>Saves</th>
+                                    <th>Bus Flips</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>`;
+                    
+                    summaryData.slice(0, 50).forEach(row => {{
+                        const statusColor = row.hasFlips ? '#e74c3c' : '#27ae60';
+                        const statusText = row.hasFlips ? 'Has Flips' : 'Clean';
+                        tableHtml += `
+                            <tr>
+                                <td>${{row.testCaseId}}</td>
+                                <td>${{row.startTime}}</td>
+                                <td>${{row.duration}}</td>
+                                <td>${{row.unitCount}}</td>
+                                <td>${{row.stationCount}}</td>
+                                <td>${{row.saveCount}}</td>
+                                <td>${{row.flipCount}}</td>
+                                <td style="color: ${{statusColor}}; font-weight: bold;">${{statusText}}</td>
+                            </tr>`;
                     }});
+                    
+                    tableHtml += '</tbody></table>';
+                    document.getElementById('testCaseSummaryTable').innerHTML = tableHtml;
                 }} else {{
-                    document.getElementById('testCaseTimeline').innerHTML = '<p>No test case data available</p>';
+                    document.getElementById('testCaseSummaryTable').innerHTML = '<p>No test case data available</p>';
                 }}
                 
                 // Hourly distribution
@@ -3279,24 +3322,47 @@ class StreamlinedBusMonitorDashboard:
                     return;
                 }}
                 
-                // Aggregate by requirement name
+                // Aggregate by requirement name - NEW APPROACH for test cases
                 const reqSummary = {{}};
+                
+                // First, create a map of all test cases that had flips
+                const testCasesWithFlips = new Set();
+                testCaseFlipData.forEach(tf => {{
+                    if (tf.total_bus_flips > 0) {{
+                        testCasesWithFlips.add(tf.test_case_id);
+                    }}
+                }});
+                
                 filteredRequirementsData.forEach(r => {{
                     if (!reqSummary[r.requirement_name]) {{
                         reqSummary[r.requirement_name] = {{
                             flipCount: 0,
                             msgTypes: new Set(),
                             testCases: new Set(),
-                            locations: new Set()
+                            locations: new Set(),
+                            affectedTestCases: new Set()
                         }};
                     }}
                     reqSummary[r.requirement_name].flipCount += r.flip_count;
                     reqSummary[r.requirement_name].msgTypes.add(r.msg_type_affected);
                     reqSummary[r.requirement_name].locations.add(`${{r.unit_id}}/${{r.station}}/${{r.save}}`);
                     
-                    // Fixed test case ID extraction
+                    // New approach: Look for test cases from the test case data directly
+                    const matchingTestCases = testCaseData.filter(tc => 
+                        tc.unit_id === r.unit_id && 
+                        tc.station === r.station && 
+                        tc.save === r.save
+                    );
+                    
+                    matchingTestCases.forEach(tc => {{
+                        reqSummary[r.requirement_name].testCases.add(tc.test_case_id);
+                        if (testCasesWithFlips.has(tc.test_case_id)) {{
+                            reqSummary[r.requirement_name].affectedTestCases.add(tc.test_case_id);
+                        }}
+                    }});
+                    
+                    // Also try the old approach as fallback
                     if (r.test_case_ids && r.test_case_ids !== 'N/A' && r.test_case_ids !== '') {{
-                        // Handle both comma-separated and other formats
                         const tcIds = r.test_case_ids.toString().split(/[,;\\s]+/);
                         tcIds.forEach(tc => {{
                             const trimmed = tc.trim();
@@ -3345,83 +3411,151 @@ class StreamlinedBusMonitorDashboard:
             
             function drawDataWordCharts() {{
                 if (filteredDataWordData.length === 0) {{
-                    document.getElementById('dataWordTopIssues').innerHTML = '<p>No data word analysis available</p>';
+                    document.getElementById('dataWordImpactMatrix').innerHTML = '<p>No data word analysis available</p>';
                     return;
                 }}
                 
-                // Top data words with issues - simplified bar chart
-                const topDataWords = filteredDataWordData.slice(0, 20);
+                // Create impact matrix - bubble chart showing msg type vs data word
+                const matrixData = [];
+                const msgTypeSet = new Set();
+                const dataWordSet = new Set();
                 
-                Plotly.newPlot('dataWordTopIssues', [{{
-                    x: topDataWords.map(d => `${{d.msg_type}}-${{d.data_word}}`),
-                    y: topDataWords.map(d => d.total_issues),
-                    type: 'bar',
-                    marker: {{ color: '#e74c3c' }},
-                    text: topDataWords.map(d => `${{d.issue_percentage}}% of all issues`),
-                    hovertemplate: '%{{x}}<br>Issues: %{{y}}<br>%{{text}}<extra></extra>'
-                }}], {{
-                    margin: {{ t: 10, b: 120, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Message Type - Data Word', tickangle: -45 }},
-                    yaxis: {{ title: 'Total Issues' }}
-                }});
-                
-                // Data word errors by message type
-                const msgTypeErrors = {{}};
                 filteredDataWordData.forEach(d => {{
-                    if (!msgTypeErrors[d.msg_type]) {{
-                        msgTypeErrors[d.msg_type] = 0;
-                    }}
-                    msgTypeErrors[d.msg_type] += d.total_issues;
+                    msgTypeSet.add(d.msg_type);
+                    dataWordSet.add(d.data_word);
                 }});
                 
-                const sortedMsgTypes = Object.entries(msgTypeErrors)
+                // Create bubble chart data
+                const bubbleData = filteredDataWordData.map(d => ({{
+                    x: d.msg_type,
+                    y: d.data_word,
+                    size: d.total_issues,
+                    color: d.affected_units || 1,
+                    text: `Issues: ${{d.total_issues}}<br>Units: ${{d.affected_units}}<br>Pattern: ${{d.most_common_error || 'N/A'}}`
+                }}));
+                
+                Plotly.newPlot('dataWordImpactMatrix', [{{
+                    x: bubbleData.map(d => d.x),
+                    y: bubbleData.map(d => d.y),
+                    mode: 'markers',
+                    marker: {{
+                        size: bubbleData.map(d => Math.sqrt(d.size) * 3),
+                        color: bubbleData.map(d => d.color),
+                        colorscale: 'Viridis',
+                        showscale: true,
+                        colorbar: {{
+                            title: 'Affected<br>Units'
+                        }}
+                    }},
+                    text: bubbleData.map(d => d.text),
+                    hovertemplate: '%{{x}} - %{{y}}<br>%{{text}}<extra></extra>',
+                    type: 'scatter'
+                }}], {{
+                    margin: {{ t: 10, b: 100, l: 100, r: 60 }},
+                    xaxis: {{ title: 'Message Type', tickangle: -45 }},
+                    yaxis: {{ title: 'Data Word' }},
+                    height: 500
+                }});
+                
+                // Error Pattern Analysis - show most common error transitions
+                const patternCounts = {{}};
+                filteredDataWordData.forEach(d => {{
+                    if (d.most_common_error && d.most_common_error !== 'N/A') {{
+                        const pattern = `${{d.msg_type}}: ${{d.most_common_error}}`;
+                        if (!patternCounts[pattern]) {{
+                            patternCounts[pattern] = 0;
+                        }}
+                        patternCounts[pattern] += d.most_common_count || d.total_issues;
+                    }}
+                }});
+                
+                const topPatterns = Object.entries(patternCounts)
                     .sort((a, b) => b[1] - a[1])
                     .slice(0, 15);
                 
-                Plotly.newPlot('dataWordByMsgType', [{{
-                    x: sortedMsgTypes.map(x => x[0]),
-                    y: sortedMsgTypes.map(x => x[1]),
+                Plotly.newPlot('errorPatternChart', [{{
+                    x: topPatterns.map(p => p[1]),
+                    y: topPatterns.map(p => p[0]),
                     type: 'bar',
-                    marker: {{ color: '#9b59b6' }}
-                }}], {{
-                    margin: {{ t: 10, b: 100, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Message Type', tickangle: -45 }},
-                    yaxis: {{ title: 'Total Data Word Errors' }}
-                }});
-                
-                // Single vs Multi-word changes
-                let singleTotal = 0;
-                let multiTotal = 0;
-                filteredDataWordData.forEach(d => {{
-                    singleTotal += d.single_word_changes || 0;
-                    multiTotal += d.multi_word_changes || 0;
-                }});
-                
-                Plotly.newPlot('singleVsMultiWord', [{{
-                    labels: ['Single Word Changes', 'Multi-Word Changes'],
-                    values: [singleTotal, multiTotal],
-                    type: 'pie',
+                    orientation: 'h',
                     marker: {{
-                        colors: ['#3498db', '#e74c3c']
-                    }},
-                    textinfo: 'label+percent+value'
+                        color: topPatterns.map((_, i) => i < 5 ? '#e74c3c' : '#3498db')
+                    }}
                 }}], {{
-                    margin: {{ t: 20, b: 20, l: 20, r: 20 }},
+                    margin: {{ t: 10, b: 60, l: 200, r: 20 }},
+                    xaxis: {{ title: 'Frequency' }},
+                    yaxis: {{ title: 'Error Pattern' }},
                     height: 400
                 }});
                 
-                // Populate data word table
+                // Calculate metrics
+                const totalIssues = filteredDataWordData.reduce((sum, d) => sum + d.total_issues, 0);
+                const uniqueDataWords = new Set(filteredDataWordData.map(d => d.data_word)).size;
+                const uniqueMsgTypes = new Set(filteredDataWordData.map(d => d.msg_type)).size;
+                
+                let singleWordIssues = 0;
+                let multiWordIssues = 0;
+                let fastestFlip = Infinity;
+                let avgFlipSpeed = 0;
+                let speedCount = 0;
+                
+                filteredDataWordData.forEach(d => {{
+                    singleWordIssues += d.single_word_changes || 0;
+                    multiWordIssues += d.multi_word_changes || 0;
+                    if (d.avg_flip_speed_ms && d.avg_flip_speed_ms > 0) {{
+                        fastestFlip = Math.min(fastestFlip, d.avg_flip_speed_ms);
+                        avgFlipSpeed += d.avg_flip_speed_ms;
+                        speedCount++;
+                    }}
+                }});
+                
+                avgFlipSpeed = speedCount > 0 ? (avgFlipSpeed / speedCount) : 0;
+                const multiWordPercent = totalIssues > 0 ? ((multiWordIssues / (singleWordIssues + multiWordIssues)) * 100) : 0;
+                
+                const metricsHtml = `
+                    <div class="metric-card">
+                        <div class="metric-title">Total Data Word Issues</div>
+                        <div class="metric-value">${{totalIssues.toLocaleString()}}</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-title">Unique Data Words</div>
+                        <div class="metric-value">${{uniqueDataWords}}</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-title">Affected Message Types</div>
+                        <div class="metric-value">${{uniqueMsgTypes}}</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-title">Multi-Word Changes</div>
+                        <div class="metric-value" style="color: #e74c3c;">${{multiWordPercent.toFixed(1)}}%</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-title">Fastest Flip Speed</div>
+                        <div class="metric-value">${{fastestFlip === Infinity ? 'N/A' : fastestFlip.toFixed(3) + 'ms'}}</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-title">Avg Flip Speed</div>
+                        <div class="metric-value">${{avgFlipSpeed > 0 ? avgFlipSpeed.toFixed(3) + 'ms' : 'N/A'}}</div>
+                    </div>
+                `;
+                document.getElementById('dataWordMetrics').innerHTML = metricsHtml;
+                
+                // Populate improved data word table
                 const tableBody = document.getElementById('dataWordTableBody');
                 tableBody.innerHTML = '';
                 
-                topDataWords.forEach(d => {{
+                filteredDataWordData.slice(0, 50).forEach(d => {{
                     const row = tableBody.insertRow();
+                    const singleMulti = (d.single_word_changes || 0) > (d.multi_word_changes || 0) ? 'Single' : 'Multi';
+                    const locations = `${{d.affected_units || 0}}U/${{d.affected_stations || 0}}S/${{d.affected_saves || 0}}S`;
+                    
                     row.insertCell(0).textContent = d.msg_type || '';
                     row.insertCell(1).textContent = d.data_word || '';
                     row.insertCell(2).textContent = d.total_issues || 0;
-                    row.insertCell(3).textContent = `${{d.issue_percentage || 0}}%`;
+                    row.insertCell(3).textContent = singleMulti;
                     row.insertCell(4).textContent = d.most_common_error || 'N/A';
-                    row.insertCell(5).textContent = d.affected_units || 0;
+                    row.insertCell(5).textContent = d.avg_flip_speed_ms ? d.avg_flip_speed_ms.toFixed(3) : 'N/A';
+                    row.insertCell(6).textContent = locations;
                 }});
             }}
             
@@ -3464,3 +3598,4 @@ class StreamlinedBusMonitorDashboard:
         
         print(f"\nEnhanced interactive dashboard saved to: {dashboard_path.absolute()}")
         return dashboard_path
+
