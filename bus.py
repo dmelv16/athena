@@ -27,6 +27,7 @@ class StreamlinedBusMonitorDashboard:
         self.requirements_folder = Path("./requirements")  # <-- PATH TO REQUIREMENTS EXCEL FILES
         self.output_folder = Path("./bus_monitor_output")  # <-- OUTPUT FOLDER
         self.tca_folder = Path("./TCA")  # <-- PATH TO TCA FOLDER
+        self.test_cases_folder = Path("./TestCases")
 
         # Create output folder
         self.output_folder.mkdir(exist_ok=True)
@@ -62,7 +63,13 @@ class StreamlinedBusMonitorDashboard:
         self.total_messages_processed = 0
         self.messages_with_dc_on = 0
         self.invalid_dc_messages = 0
-        
+
+        # Add new storage for test case requirements
+        self.test_case_requirements = []  # Store parsed test case requirement results
+        self.df_test_case_requirements = None  # DataFrame for test case requirements
+        self.df_test_case_req_failures = None  # DataFrame for failures only
+        self.df_test_case_req_with_flips = None  # Requirements failures with bus flips
+
         # DataFrames
         self.df_flips = None
         self.df_flips_no_changes = None
@@ -1040,7 +1047,7 @@ class StreamlinedBusMonitorDashboard:
                 
                 # Check for required columns
                 required_cols = ['platform', 'test_event_id', 'test_case_id', 
-                               'timestamp_start', 'test_case_analysis_timestamp_end']
+                            'timestamp_start', 'test_case_analysis_timestamp_end']
                 
                 if not all(col in df_tca.columns for col in required_cols):
                     print(f"  Warning: {tca_file.name} missing required columns")
@@ -1048,6 +1055,9 @@ class StreamlinedBusMonitorDashboard:
                 
                 # Process each test case
                 for _, row in df_tca.iterrows():
+                    original_test_case_id = row.get('test_case_id')
+                    grouped_test_case_id = self.group_test_case_id(str(original_test_case_id))  # ADD THIS LINE
+                    
                     test_case_data.append({
                         'unit_id': unit_id,
                         'station': station,
@@ -1055,11 +1065,12 @@ class StreamlinedBusMonitorDashboard:
                         'platform': row.get('platform', ''),
                         'ofp': row.get('ofp', ''),
                         'test_event_id': row.get('test_event_id'),
-                        'test_case_id': row.get('test_case_id'),
+                        'test_case_id': grouped_test_case_id,  # CHANGED: Use grouped ID
+                        'test_case_id_original': original_test_case_id,  # ADDED: Keep original
                         'timestamp_start': row.get('timestamp_start'),
                         'timestamp_end': row.get('test_case_analysis_timestamp_end'),
                         'duration': row.get('test_case_analysis_timestamp_end', 0) - row.get('timestamp_start', 0) 
-                                   if pd.notna(row.get('test_case_analysis_timestamp_end')) and pd.notna(row.get('timestamp_start')) else 0
+                                if pd.notna(row.get('test_case_analysis_timestamp_end')) and pd.notna(row.get('timestamp_start')) else 0
                     })
                 
                 print(f"  Loaded {tca_file.name}: {len(df_tca)} test cases")
@@ -1070,6 +1081,12 @@ class StreamlinedBusMonitorDashboard:
         self.test_cases = test_case_data
         if test_case_data:
             self.df_test_cases = pd.DataFrame(test_case_data)
+            
+            # Print grouping summary
+            if 'test_case_id_original' in self.df_test_cases.columns:
+                original_count = self.df_test_cases['test_case_id_original'].nunique()
+                grouped_count = self.df_test_cases['test_case_id'].nunique()
+                print(f"  Grouped {original_count} original test case variants into {grouped_count} groups")
         
         print(f"  Total test cases loaded: {len(test_case_data)}")
         return test_case_data
@@ -1321,52 +1338,58 @@ class StreamlinedBusMonitorDashboard:
             return
         
         # 1. Overall by Message Type (main view)
-        msg_type_agg = self.df_message_rates.groupby('msg_type').agg({
-            'total_messages': 'sum',
-            'min_time_diff_ms': 'min',
-            'max_time_diff_ms': 'max',
-            'avg_time_diff_ms': 'mean',
-            'std_time_diff_ms': 'mean',
-            'median_time_diff_ms': 'median',
-            'p25_time_diff_ms': 'mean',
-            'p75_time_diff_ms': 'mean',
-            'p95_time_diff_ms': 'mean',
-            'p99_time_diff_ms': 'mean'
-        }).round(3).reset_index()
+        # Use weighted average based on message counts
+        msg_type_agg = self.df_message_rates.groupby('msg_type').apply(
+            lambda x: pd.Series({
+                'total_messages': x['total_messages'].sum(),
+                'min_time_diff_ms': x['min_time_diff_ms'].min(),
+                'max_time_diff_ms': x['max_time_diff_ms'].max(),
+                # Weighted average by message count
+                'avg_time_diff_ms': (x['avg_time_diff_ms'] * x['total_messages']).sum() / x['total_messages'].sum() if x['total_messages'].sum() > 0 else 0,
+                'std_time_diff_ms': (x['std_time_diff_ms'] * x['total_messages']).sum() / x['total_messages'].sum() if x['total_messages'].sum() > 0 else 0,
+                'median_time_diff_ms': x['median_time_diff_ms'].median(),
+                'p25_time_diff_ms': (x['p25_time_diff_ms'] * x['total_messages']).sum() / x['total_messages'].sum() if x['total_messages'].sum() > 0 else 0,
+                'p75_time_diff_ms': (x['p75_time_diff_ms'] * x['total_messages']).sum() / x['total_messages'].sum() if x['total_messages'].sum() > 0 else 0,
+                'p95_time_diff_ms': (x['p95_time_diff_ms'] * x['total_messages']).sum() / x['total_messages'].sum() if x['total_messages'].sum() > 0 else 0,
+                'p99_time_diff_ms': (x['p99_time_diff_ms'] * x['total_messages']).sum() / x['total_messages'].sum() if x['total_messages'].sum() > 0 else 0
+            })
+        ).round(3).reset_index()
         
-        # Add count of unique locations (unit/station/save combinations)
+        # Add count of unique locations
         unique_locations = self.df_message_rates.groupby('msg_type').apply(
             lambda x: x[['unit_id', 'station', 'save']].drop_duplicates().shape[0]
         ).values
         msg_type_agg['unique_locations'] = unique_locations
         
-        # Sort by average time difference to highlight concerning messages (0.3-1ms)
         self.df_message_rates_summary = msg_type_agg.sort_values('avg_time_diff_ms')
         
-        # 2. By Unit ID and Message Type
-        unit_agg = self.df_message_rates.groupby(['unit_id', 'msg_type']).agg({
-            'total_messages': 'sum',
-            'min_time_diff_ms': 'min',
-            'max_time_diff_ms': 'max',
-            'avg_time_diff_ms': 'mean',
-            'std_time_diff_ms': 'mean',
-            'median_time_diff_ms': 'median'
-        }).round(3).reset_index()
+        # 2. By Unit ID and Message Type (weighted average)
+        unit_agg = self.df_message_rates.groupby(['unit_id', 'msg_type']).apply(
+            lambda x: pd.Series({
+                'total_messages': x['total_messages'].sum(),
+                'min_time_diff_ms': x['min_time_diff_ms'].min(),
+                'max_time_diff_ms': x['max_time_diff_ms'].max(),
+                'avg_time_diff_ms': (x['avg_time_diff_ms'] * x['total_messages']).sum() / x['total_messages'].sum() if x['total_messages'].sum() > 0 else 0,
+                'std_time_diff_ms': (x['std_time_diff_ms'] * x['total_messages']).sum() / x['total_messages'].sum() if x['total_messages'].sum() > 0 else 0,
+                'median_time_diff_ms': x['median_time_diff_ms'].median()
+            })
+        ).round(3).reset_index()
         self.df_message_rates_by_unit = unit_agg.sort_values(['unit_id', 'msg_type'])
         
-        # 3. By Station and Message Type
-        station_agg = self.df_message_rates.groupby(['station', 'msg_type']).agg({
-            'total_messages': 'sum',
-            'min_time_diff_ms': 'min',
-            'max_time_diff_ms': 'max',
-            'avg_time_diff_ms': 'mean',
-            'std_time_diff_ms': 'mean',
-            'median_time_diff_ms': 'median'
-        }).round(3).reset_index()
+        # 3. By Station and Message Type (weighted average)
+        station_agg = self.df_message_rates.groupby(['station', 'msg_type']).apply(
+            lambda x: pd.Series({
+                'total_messages': x['total_messages'].sum(),
+                'min_time_diff_ms': x['min_time_diff_ms'].min(),
+                'max_time_diff_ms': x['max_time_diff_ms'].max(),
+                'avg_time_diff_ms': (x['avg_time_diff_ms'] * x['total_messages']).sum() / x['total_messages'].sum() if x['total_messages'].sum() > 0 else 0,
+                'std_time_diff_ms': (x['std_time_diff_ms'] * x['total_messages']).sum() / x['total_messages'].sum() if x['total_messages'].sum() > 0 else 0,
+                'median_time_diff_ms': x['median_time_diff_ms'].median()
+            })
+        ).round(3).reset_index()
         self.df_message_rates_by_station = station_agg.sort_values(['station', 'msg_type'])
         
-        # 4. Full detail by Save (unit_id, station, save, msg_type)
-        # This is already in self.df_message_rates, just sort it
+        # 4. Full detail by Save (already correct)
         self.df_message_rates_by_save = self.df_message_rates.sort_values(['unit_id', 'station', 'save', 'msg_type'])
 
     def calculate_test_case_message_rates(self):
@@ -1583,6 +1606,374 @@ class StreamlinedBusMonitorDashboard:
             self.df_test_case_summary = pd.DataFrame(summary_data)
             self.df_test_case_summary = self.df_test_case_summary.sort_values('test_event_id')
 
+    def load_test_case_requirements(self):
+        """
+        Load test case-specific requirements from TestCases folder structure.
+        Each test case folder contains requirement CSVs (e.g., ps3_0070.csv).
+        Only processes rows with TRUE or FALSE results.
+        """
+        if not self.test_cases_folder.exists():
+            print(f"Note: TestCases folder '{self.test_cases_folder}' does not exist")
+            return []
+        
+        test_case_folders = [d for d in self.test_cases_folder.iterdir() if d.is_dir()]
+        
+        if not test_case_folders:
+            print(f"No test case folders found in {self.test_cases_folder}")
+            return []
+        
+        print(f"\nLoading test case requirements from {len(test_case_folders)} test case folders...")
+        
+        requirements_results = []
+        
+        for test_case_folder in test_case_folders:
+            original_test_case_id = test_case_folder.name  # e.g., "QS-007_02" or "QS-007_04"
+            grouped_test_case_id = self.group_test_case_id(original_test_case_id)
+            
+            # Find all CSV files in this test case folder
+            csv_files = list(test_case_folder.glob("*.csv"))
+            
+            if not csv_files:
+                continue
+            
+            print(f"  Processing test case: {original_test_case_id} -> {grouped_test_case_id}")
+            
+            for csv_file in csv_files:
+                try:
+                    # Requirement name is the CSV filename without extension
+                    requirement_name = csv_file.stem  # e.g., "ps3_0070"
+                    
+                    # Read the CSV
+                    df = pd.read_csv(csv_file)
+                    
+                    # Check for required columns
+                    required_cols = ['unit_id', 'station', 'save', 'timestamp']
+                    if not all(col in df.columns for col in required_cols):
+                        print(f"    Warning: {csv_file.name} missing required columns")
+                        continue
+                    
+                    # Check if the requirement column exists (column name = requirement name)
+                    if requirement_name not in df.columns:
+                        print(f"    Warning: {csv_file.name} missing column '{requirement_name}'")
+                        continue
+                    
+                    # FILTER: Only keep rows with TRUE or FALSE in the requirement column
+                    # Convert to string and uppercase for case-insensitive comparison
+                    df[requirement_name] = df[requirement_name].astype(str).str.strip().str.upper()
+                    
+                    # Filter to only TRUE or FALSE rows
+                    df_filtered = df[df[requirement_name].isin(['TRUE', 'FALSE'])].copy()
+                    
+                    # If no TRUE/FALSE rows exist, the requirement passed (no failures to report)
+                    if df_filtered.empty:
+                        print(f"    Skipped {csv_file.name}: No TRUE/FALSE results (passed by default)")
+                        continue
+                    
+                    rows_before = len(df)
+                    rows_after = len(df_filtered)
+                    print(f"    Loaded {csv_file.name}: {rows_after}/{rows_before} rows with TRUE/FALSE")
+                    
+                    # Process each filtered row
+                    for _, row in df_filtered.iterrows():
+                        unit_id = str(row.get('unit_id', '')).strip()
+                        station = str(row.get('station', '')).strip()
+                        save = str(row.get('save', '')).strip()
+                        timestamp = row.get('timestamp')
+                        ofp = str(row.get('ofp', '')).strip() if 'ofp' in df.columns else ''
+                        
+                        # Get the requirement result (already filtered to TRUE or FALSE)
+                        result_value = row[requirement_name]
+                        
+                        # Skip if missing required fields
+                        if not unit_id or not station or not save or pd.isna(timestamp):
+                            continue
+                        
+                        requirements_results.append({
+                            'test_case_id': grouped_test_case_id,
+                            'test_case_id_original': original_test_case_id,
+                            'requirement_name': requirement_name,
+                            'unit_id': unit_id,
+                            'station': station,
+                            'save': save,
+                            'ofp': ofp,
+                            'timestamp': timestamp,
+                            'result': result_value,
+                            'passed': result_value == 'TRUE',
+                            'failed': result_value == 'FALSE'
+                        })
+                    
+                except Exception as e:
+                    print(f"    Error loading {csv_file.name}: {e}")
+        
+        print(f"  Total test case requirement results loaded: {len(requirements_results)}")
+        
+        self.test_case_requirements = requirements_results
+        if requirements_results:
+            self.df_test_case_requirements = pd.DataFrame(requirements_results)
+            
+            # Print summary statistics
+            if len(requirements_results) > 0:
+                total_passed = sum(1 for r in requirements_results if r['passed'])
+                total_failed = sum(1 for r in requirements_results if r['failed'])
+                print(f"    Summary: {total_passed} passed, {total_failed} failed")
+        
+        return requirements_results
+
+    def get_requirement_message_types(self):
+        """
+        Extract message types from requirement CSV files by analyzing decoded_description column.
+        Returns a dict mapping requirement_name -> list of message types.
+        """
+        requirement_msg_types = {}
+        
+        if not self.test_cases_folder.exists():
+            return requirement_msg_types
+        
+        test_case_folders = [d for d in self.test_cases_folder.iterdir() if d.is_dir()]
+        
+        for test_case_folder in test_case_folders:
+            csv_files = list(test_case_folder.glob("*.csv"))
+            
+            for csv_file in csv_files:
+                try:
+                    requirement_name = csv_file.stem
+                    
+                    # Skip if we already processed this requirement
+                    if requirement_name in requirement_msg_types:
+                        continue
+                    
+                    # Read the CSV
+                    df = pd.read_csv(csv_file)
+                    
+                    # Check if decoded_description column exists
+                    if 'decoded_description' not in df.columns:
+                        continue
+                    
+                    # Extract message types from decoded_description
+                    msg_types = set()
+                    for decoded_desc in df['decoded_description'].dropna().unique():
+                        msg_type, _ = self.extract_message_type(decoded_desc)
+                        if msg_type:
+                            msg_types.add(msg_type)
+                    
+                    if msg_types:
+                        requirement_msg_types[requirement_name] = list(msg_types)
+                        
+                except Exception as e:
+                    continue
+        
+        return requirement_msg_types
+
+    def analyze_test_case_requirements_vs_flips(self):
+        """
+        Correlate failed test case requirements with bus flips.
+        Only counts UNIQUE bus flips that match the requirement's message types.
+        """
+        if self.df_test_case_requirements is None or self.df_test_case_requirements.empty:
+            print("No test case requirements loaded")
+            return
+        
+        if self.df_flips is None or self.df_flips.empty:
+            print("No bus flips to correlate")
+            return
+        
+        # Get message types for each requirement
+        requirement_msg_types = self.get_requirement_message_types()
+        
+        # Filter to only failures
+        failures = self.df_test_case_requirements[
+            self.df_test_case_requirements['failed'] == True
+        ].copy()
+        
+        if failures.empty:
+            print("No failed requirements found")
+            self.df_test_case_req_failures = pd.DataFrame()
+            self.df_test_case_req_with_flips = pd.DataFrame()
+            return
+        
+        print(f"\nAnalyzing {len(failures)} failed test case requirements...")
+        
+        # Track unique bus flips per requirement to avoid double-counting
+        requirement_flip_tracker = {}
+        
+        # Analyze each failure for bus flips
+        failure_analysis = []
+        
+        for _, failure in failures.iterrows():
+            failure_timestamp = failure['timestamp']
+            requirement_name = failure['requirement_name']
+            
+            # Get message types for this requirement
+            msg_types_for_req = requirement_msg_types.get(requirement_name, [])
+            
+            if not msg_types_for_req:
+                failure_analysis.append({
+                    **failure.to_dict(),
+                    'has_bus_flips': False,
+                    'flip_count': 0,
+                    'unique_flip_count': 0,
+                    'flips_near_failure': 0,
+                    'closest_flip_time_diff': None,
+                    'msg_types_with_flips': '',
+                    'data_words_affected': '',
+                    'msg_types_tested': ''
+                })
+                continue
+            
+            # Find bus flips for this SPECIFIC failure instance
+            # Filter by: location, message type, and time range
+            matching_flips = self.df_flips[
+                (self.df_flips['unit_id'] == failure['unit_id']) &
+                (self.df_flips['station'] == failure['station']) &
+                (self.df_flips['save'] == failure['save']) &
+                (self.df_flips['msg_type'].isin(msg_types_for_req))
+            ]
+            
+            if matching_flips.empty:
+                failure_analysis.append({
+                    **failure.to_dict(),
+                    'has_bus_flips': False,
+                    'flip_count': 0,
+                    'unique_flip_count': 0,
+                    'flips_near_failure': 0,
+                    'closest_flip_time_diff': None,
+                    'msg_types_with_flips': '',
+                    'data_words_affected': '',
+                    'msg_types_tested': ', '.join(msg_types_for_req)
+                })
+                continue
+            
+            # Track unique flips for this requirement (to prevent double-counting across test instances)
+            if requirement_name not in requirement_flip_tracker:
+                requirement_flip_tracker[requirement_name] = set()
+            
+            # Create unique identifiers for each flip
+            for _, flip in matching_flips.iterrows():
+                flip_id = f"{flip['unit_id']}_{flip['station']}_{flip['save']}_{flip['msg_type']}_{flip['timestamp_busA']}"
+                requirement_flip_tracker[requirement_name].add(flip_id)
+            
+            # Check for flips near the failure timestamp (within ±5 seconds)
+            time_window = 5.0
+            flips_near_failure = matching_flips[
+                (matching_flips['timestamp_busA'] >= failure_timestamp - time_window) &
+                (matching_flips['timestamp_busA'] <= failure_timestamp + time_window)
+            ]
+            
+            # Find closest flip
+            closest_flip_time_diff = None
+            if not matching_flips.empty:
+                time_diffs = abs(matching_flips['timestamp_busA'] - failure_timestamp)
+                closest_flip_time_diff = time_diffs.min()
+            
+            # Get message types with flips
+            msg_types = matching_flips['msg_type'].unique().tolist() if not matching_flips.empty else []
+            
+            # Get affected data words
+            data_words = []
+            if 'changed_data_words' in matching_flips.columns:
+                for words in matching_flips['changed_data_words']:
+                    if words and words != 'none':
+                        data_words.extend(words.split(', '))
+            unique_data_words = list(set(data_words))
+            
+            failure_analysis.append({
+                **failure.to_dict(),
+                'has_bus_flips': len(matching_flips) > 0,
+                'flip_count': len(matching_flips),  # Flips for THIS specific failure instance
+                'unique_flip_count': len(requirement_flip_tracker[requirement_name]),  # TOTAL unique flips for requirement
+                'flips_near_failure': len(flips_near_failure),
+                'closest_flip_time_diff': round(closest_flip_time_diff, 6) if closest_flip_time_diff is not None else None,
+                'msg_types_with_flips': ', '.join(msg_types[:10]),
+                'data_words_affected': ', '.join(unique_data_words[:10]),
+                'msg_types_tested': ', '.join(msg_types_for_req)
+            })
+        
+        # Create DataFrames
+        self.df_test_case_req_failures = pd.DataFrame(failure_analysis)
+        
+        # Filter to only failures with bus flips
+        self.df_test_case_req_with_flips = self.df_test_case_req_failures[
+            self.df_test_case_req_failures['has_bus_flips'] == True
+        ].sort_values('flip_count', ascending=False)
+        
+        print(f"  Failed requirements analyzed: {len(self.df_test_case_req_failures)}")
+        print(f"  Failed requirements with bus flips: {len(self.df_test_case_req_with_flips)}")
+        if not self.df_test_case_req_with_flips.empty:
+            print(f"  Failed requirements with flips near failure time: {self.df_test_case_req_with_flips['flips_near_failure'].sum()}")
+            
+            # Print unique flip counts per requirement
+            for req_name, flip_ids in requirement_flip_tracker.items():
+                if len(flip_ids) > 0:
+                    print(f"    {req_name}: {len(flip_ids)} unique bus flips")
+
+    def create_requirement_test_case_mapping(self):
+        """
+        Create a mapping showing which requirements are tested by which test cases.
+        Some requirements appear in multiple test cases.
+        """
+        if self.df_test_case_requirements is None or self.df_test_case_requirements.empty:
+            print("No test case requirements to map")
+            return
+        
+        # Group by requirement to see which test cases test it
+        req_mapping = self.df_test_case_requirements.groupby('requirement_name').agg({
+            'test_case_id': lambda x: ', '.join(sorted(set(x))),
+            'unit_id': 'nunique',
+            'station': 'nunique',
+            'save': 'nunique',
+            'passed': 'sum',
+            'failed': 'sum'
+        }).reset_index()
+        
+        req_mapping.columns = [
+            'requirement_name',
+            'test_cases',
+            'unique_units',
+            'unique_stations', 
+            'unique_saves',
+            'total_passed',
+            'total_failed'
+        ]
+        
+        # Count how many test cases each requirement appears in
+        req_mapping['test_case_count'] = req_mapping['test_cases'].apply(lambda x: len(x.split(', ')))
+        
+        # Calculate pass rate
+        req_mapping['total_tests'] = req_mapping['total_passed'] + req_mapping['total_failed']
+        req_mapping['pass_rate'] = (req_mapping['total_passed'] / req_mapping['total_tests'] * 100).round(2)
+        
+        self.df_requirement_test_case_mapping = req_mapping.sort_values('total_failed', ascending=False)
+        
+        print(f"\nRequirement-Test Case Mapping created:")
+        print(f"  Unique requirements: {len(req_mapping)}")
+        print(f"  Requirements in multiple test cases: {len(req_mapping[req_mapping['test_case_count'] > 1])}")
+        print(f"  Requirements with failures: {len(req_mapping[req_mapping['total_failed'] > 0])}")
+
+    def group_test_case_id(self, test_case_id: str):
+        """
+        Group test case IDs by removing variant suffixes.
+        Examples: 
+            QS-007_02 -> QS-007
+            QS-007_04 -> QS-007
+            TW104_01 -> TW104
+            QS_2000_02 -> QS_2000
+        """
+        # Handle combined test cases like "QS_2000_02&TW104_01"
+        if '&' in test_case_id:
+            # Split, group each part, then rejoin
+            parts = test_case_id.split('&')
+            grouped_parts = [self.group_test_case_id(part) for part in parts]
+            return '&'.join(sorted(set(grouped_parts)))
+        
+        # Remove trailing underscore + digits (e.g., _02, _04, _01)
+        # Match pattern: anything, then underscore, then 1-2 digits at the end
+        import re
+        match = re.match(r'^(.+?)(?:_\d{1,2})?$', test_case_id)
+        if match:
+            return match.group(1)
+        
+        return test_case_id
+
     def run_analysis(self):
         """Run the complete analysis on all CSV files"""
         if not self.csv_folder.exists():
@@ -1650,6 +2041,17 @@ class StreamlinedBusMonitorDashboard:
             
             print("\nCreating test case summary...")
             self.create_test_case_summary()
+            
+            # NEW: Load and analyze test case requirements
+            print("\nLoading test case requirements...")
+            self.load_test_case_requirements()
+            
+            if self.df_test_case_requirements is not None:
+                print("\nCreating requirement-test case mapping...")
+                self.create_requirement_test_case_mapping()
+                
+                print("\nAnalyzing test case requirements vs bus flips...")
+                self.analyze_test_case_requirements_vs_flips()
         
         # Calculate message rates
         print("\nCalculating message rates...")
@@ -1839,10 +2241,30 @@ class StreamlinedBusMonitorDashboard:
                 self.df_requirements_with_bus_issues.to_excel(writer, sheet_name='Requirements_With_Bus_Issues', index=False)
                 print(f"  Exported Requirements with Bus Issues: {len(self.df_requirements_with_bus_issues)} requirements")
 
+            # 27. Test Case Requirements (All)
+            if hasattr(self, 'df_test_case_requirements') and self.df_test_case_requirements is not None and len(self.df_test_case_requirements) > 0:
+                self.df_test_case_requirements.to_excel(writer, sheet_name='TestCase_Requirements', index=False)
+                print(f"  Exported Test Case Requirements: {len(self.df_test_case_requirements)} results")
+
+            # 28. Test Case Requirement Failures
+            if hasattr(self, 'df_test_case_req_failures') and self.df_test_case_req_failures is not None and len(self.df_test_case_req_failures) > 0:
+                self.df_test_case_req_failures.to_excel(writer, sheet_name='TestCase_Req_Failures', index=False)
+                print(f"  Exported Test Case Requirement Failures: {len(self.df_test_case_req_failures)} failures")
+
+            # 29. Test Case Requirements with Bus Flips
+            if hasattr(self, 'df_test_case_req_with_flips') and self.df_test_case_req_with_flips is not None and len(self.df_test_case_req_with_flips) > 0:
+                self.df_test_case_req_with_flips.to_excel(writer, sheet_name='TestCase_Req_With_Flips', index=False)
+                print(f"  Exported Test Case Requirements with Flips: {len(self.df_test_case_req_with_flips)} requirements")
+
+            # 30. Requirement-Test Case Mapping
+            if hasattr(self, 'df_requirement_test_case_mapping') and self.df_requirement_test_case_mapping is not None and len(self.df_requirement_test_case_mapping) > 0:
+                self.df_requirement_test_case_mapping.to_excel(writer, sheet_name='Requirement_TestCase_Map', index=False)
+                print(f"  Exported Requirement-Test Case Mapping: {len(self.df_requirement_test_case_mapping)} requirements")
+
         print(f"\nExcel file saved to: {excel_path.absolute()}")
         return excel_path
 
-def create_interactive_dashboard(self):
+    def create_interactive_dashboard(self):
         """Create an enhanced interactive HTML dashboard with comprehensive filters and analytics"""
         import json
         from datetime import datetime
@@ -1879,19 +2301,23 @@ def create_interactive_dashboard(self):
             # Convert milliseconds to messages per second
             for col in ['avg_time_diff_ms', 'min_time_diff_ms', 'max_time_diff_ms', 'median_time_diff_ms']:
                 if col in df_rates_temp.columns:
-                    # Calculate Hz (frequency = 1000/period_ms)
-                    df_rates_temp[f'{col.replace("_time_diff_ms", "_hz")}'] = 1000 / df_rates_temp[col]
+                    df_rates_temp[f'{col.replace("_time_diff_ms", "_rate")}'] = 1000 / df_rates_temp[col]
             message_rates_data = df_rates_temp.to_dict('records')
         
-        # Prepare message rates by location with proper Hz conversion
+        # Prepare message rates by location
         message_rates_by_location = []
         if self.df_message_rates is not None and not self.df_message_rates.empty:
             df_loc_temp = self.df_message_rates.copy()
-            # Add Hz calculations (frequency = 1000/period_ms)
-            df_loc_temp['avg_hz'] = 1000 / df_loc_temp['avg_time_diff_ms']
-            df_loc_temp['min_hz'] = 1000 / df_loc_temp['max_time_diff_ms']  # min Hz from max period
-            df_loc_temp['max_hz'] = 1000 / df_loc_temp['min_time_diff_ms']  # max Hz from min period
+            # Add rate calculations
+            df_loc_temp['msg_per_sec'] = 1000 / df_loc_temp['avg_time_diff_ms']
+            df_loc_temp['min_rate'] = 1000 / df_loc_temp['max_time_diff_ms']
+            df_loc_temp['max_rate'] = 1000 / df_loc_temp['min_time_diff_ms']
             message_rates_by_location = df_loc_temp.to_dict('records')
+        
+        # Prepare failed requirements data
+        failed_requirements_data = []
+        if hasattr(self, 'df_failed_requirements_analysis') and self.df_failed_requirements_analysis is not None:
+            failed_requirements_data = self.df_failed_requirements_analysis.to_dict('records')
         
         # Prepare requirements at risk data
         requirements_at_risk_data = []
@@ -1900,13 +2326,22 @@ def create_interactive_dashboard(self):
             if 'test_cases_affected' in df_req_temp.columns:
                 df_req_temp['test_cases_affected'] = df_req_temp['test_cases_affected'].astype(str)
             requirements_at_risk_data = df_req_temp.to_dict('records')
-        
-        # Prepare data word analysis
-        data_word_data = []
-        if self.df_data_word_analysis is not None and not self.df_data_word_analysis.empty:
-            # Don't limit to 50, get all for better visualization
-            data_word_data = self.df_data_word_analysis.to_dict('records')
-        
+
+        # Prepare test case requirements data (NEW)
+        test_case_requirements_data = []
+        if hasattr(self, 'df_test_case_req_with_flips') and self.df_test_case_req_with_flips is not None:
+            test_case_requirements_data = self.df_test_case_req_with_flips.to_dict('records')
+
+        # Prepare requirement-test case mapping (NEW)
+        requirement_mapping_data = []
+        if hasattr(self, 'df_requirement_test_case_mapping') and self.df_requirement_test_case_mapping is not None:
+            requirement_mapping_data = self.df_requirement_test_case_mapping.to_dict('records')
+
+        # Get unique requirement names for filter (NEW)
+        requirement_names = []
+        if hasattr(self, 'df_test_case_requirements') and self.df_test_case_requirements is not None:
+            requirement_names = sorted(self.df_test_case_requirements['requirement_name'].unique().tolist())
+
         # Get unique values for filters
         unit_ids = sorted(self.df_flips['unit_id'].unique().tolist()) if self.df_flips is not None else []
         stations = sorted(self.df_flips['station'].unique().tolist()) if self.df_flips is not None else []
@@ -1921,11 +2356,19 @@ def create_interactive_dashboard(self):
         # Calculate summary stats
         total_flips = len(self.df_flips) if self.df_flips is not None else 0
         total_flips_no_changes = len(self.df_flips_no_changes) if self.df_flips_no_changes is not None else 0
+        total_units = len(unit_ids)
+        total_stations = len(stations)
+        total_saves = len(saves)
         
         # Calculate flip percentage
         flip_percentage = 0
         if self.total_messages_processed > 0:
             flip_percentage = (total_flips / self.total_messages_processed) * 100
+        
+        # Prepare data word analysis
+        data_word_data = []
+        if self.df_data_word_analysis is not None and not self.df_data_word_analysis.empty:
+            data_word_data = self.df_data_word_analysis.head(50).to_dict('records')
         
         # Convert to JSON
         flips_data_json = json.dumps(flips_data)
@@ -1933,6 +2376,7 @@ def create_interactive_dashboard(self):
         test_case_flip_data_json = json.dumps(test_case_flip_data)
         message_rates_data_json = json.dumps(message_rates_data)
         message_rates_by_location_json = json.dumps(message_rates_by_location)
+        failed_requirements_data_json = json.dumps(failed_requirements_data)
         requirements_at_risk_data_json = json.dumps(requirements_at_risk_data)
         data_word_data_json = json.dumps(data_word_data)
         unit_ids_json = json.dumps(unit_ids)
@@ -1940,7 +2384,9 @@ def create_interactive_dashboard(self):
         saves_json = json.dumps(saves)
         msg_types_json = json.dumps(msg_types)
         test_case_ids_json = json.dumps(test_case_ids)
-        
+        test_case_requirements_data_json = json.dumps(test_case_requirements_data)
+        requirement_mapping_data_json = json.dumps(requirement_mapping_data)
+        requirement_names_json = json.dumps(requirement_names)       
         html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -2270,19 +2716,19 @@ def create_interactive_dashboard(self):
                         <div class="chart-title">Test Case Execution Summary (Grouped)</div>
                         <div class="info-box">
                             <strong>Test Case Summary:</strong> Shows aggregated test cases with time ranges and bus flip counts.
-                            Test cases are grouped by their base name.
+                            Test cases are grouped by their base name (e.g., QS_2000_01 and QS_2000_02 are grouped as QS_2000).
                         </div>
                         <div id="testCaseSummaryTable"></div>
                     </div>
                     
                     <div class="chart-container">
-                        <div class="chart-title">Test Case Location Details</div>
+                        <div class="chart-title">Test Case Execution by Location</div>
                         <div class="info-box">
-                            <strong>Location Breakdown:</strong> Shows which test cases were run on each unit/station/save combination.
+                            <strong>Location Details:</strong> Shows which test cases ran at each unit/station/save combination.
                         </div>
-                        <div id="testCaseLocationTable"></div>
+                        <div id="locationExecutionTable"></div>
                     </div>
-                    
+
                     <div class="chart-container">
                         <div class="chart-title">Hourly Bus Flip Distribution</div>
                         <div id="hourlyChart"></div>
@@ -2300,10 +2746,11 @@ def create_interactive_dashboard(self):
                 <!-- Message Rates Tab -->
                 <div id="rates-tab" class="tab-content">
                     <div class="chart-container">
-                        <div class="chart-title">Message Rate Statistics by Type (Sampling Rate in Hz)</div>
+                        <div class="chart-title">Message Rate Statistics by Type</div>
                         <div class="info-box">
-                            <strong>Sampling Rate Analysis:</strong> Shows sampling frequency in Hertz (samples/second) for each message type.
-                            Critical: >1kHz (red), Warning: >100Hz (orange), Normal: <100Hz (blue).
+                            <strong>Message Rate Analysis:</strong> Shows sampling rates per station-save-msgtype combination.
+                            Each bar represents the maximum rate observed for that message type across ALL locations.
+                            Critical: >1000 Hz, Warning: >100 Hz.
                         </div>
                         <div id="messageRateStats"></div>
                     </div>
@@ -2316,7 +2763,7 @@ def create_interactive_dashboard(self):
                     <div class="chart-container">
                         <div class="chart-title">High-Frequency Station-Save Combinations</div>
                         <div class="info-box">
-                            <strong>Note:</strong> Rates are calculated per save independently, not aggregated across saves in a station.
+                            <strong>Note:</strong> Rates are calculated per save, not aggregated across saves in a station.
                         </div>
                         <div id="stationSaveHighFreq"></div>
                     </div>
@@ -2369,31 +2816,85 @@ def create_interactive_dashboard(self):
                 
                 <!-- Requirements Tab -->
                 <div id="requirements-tab" class="tab-content">
+                    <!-- Universal Requirements Section -->
                     <div class="chart-container">
-                        <div class="chart-title">Requirements Affected by Bus Flips</div>
+                        <div class="chart-title">📋 Universal Requirements (All Locations)</div>
                         <div class="info-box">
-                            <strong>Requirements Impact:</strong> Shows requirements and their associated bus flip counts,
-                            along with test case information.
+                            <strong>Universal Requirements:</strong> These requirements exist on every unit/station/save combination 
+                            and are not mapped to specific test cases.
                         </div>
-                        <div id="requirementsChart"></div>
+                        <div id="universalRequirementsChart"></div>
                     </div>
                     
                     <div class="chart-container">
-                        <div class="chart-title">Requirements Detail Table</div>
+                        <div class="chart-title">Universal Requirements Detail Table</div>
                         <div style="overflow-x: auto;">
-                            <table id="requirementsTable" class="data-table">
+                            <table id="universalRequirementsTable" class="data-table">
                                 <thead>
                                     <tr>
-                                        <th onclick="sortTable('requirementsTable', 0)">Requirement</th>
-                                        <th onclick="sortTable('requirementsTable', 1)">Unit/Station/Save</th>
-                                        <th onclick="sortTable('requirementsTable', 2)">Message Type</th>
-                                        <th onclick="sortTable('requirementsTable', 3)">Flip Count</th>
-                                        <th onclick="sortTable('requirementsTable', 4)">Test Cases Affected</th>
-                                        <th onclick="sortTable('requirementsTable', 5)">Test Case IDs</th>
+                                        <th onclick="sortTable('universalRequirementsTable', 0)">Requirement</th>
+                                        <th onclick="sortTable('universalRequirementsTable', 1)">Unit/Station/Save</th>
+                                        <th onclick="sortTable('universalRequirementsTable', 2)">Message Type</th>
+                                        <th onclick="sortTable('universalRequirementsTable', 3)">Flip Count</th>
+                                        <th onclick="sortTable('universalRequirementsTable', 4)">Test Cases Affected</th>
+                                        <th onclick="sortTable('universalRequirementsTable', 5)">Test Case IDs</th>
                                     </tr>
                                 </thead>
-                                <tbody id="requirementsTableBody"></tbody>
+                                <tbody id="universalRequirementsTableBody"></tbody>
                             </table>
+                        </div>
+                    </div>
+                    
+                    <!-- Test Case Specific Requirements Section -->
+                    <div class="chart-container">
+                        <div class="chart-title">🎯 Test Case Specific Requirements</div>
+                        <div class="info-box">
+                            <strong>Test Case Requirements:</strong> These requirements are mapped to specific test cases. 
+                            Shows requirements that failed AND had bus flips during the failure.
+                        </div>
+                        <div id="testCaseRequirementsChart"></div>
+                    </div>
+                    
+                    <div class="chart-container">
+                        <div class="chart-title">Requirement-Test Case Mapping</div>
+                        <div class="info-box">
+                            <strong>Mapping Info:</strong> Shows which requirements are tested by which test cases. 
+                            Some requirements may appear in multiple test cases.
+                        </div>
+                        <div style="overflow-x: auto;">
+                            <table id="requirementMappingTable" class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th onclick="sortTable('requirementMappingTable', 0)">Requirement</th>
+                                        <th onclick="sortTable('requirementMappingTable', 1)">Test Cases</th>
+                                        <th onclick="sortTable('requirementMappingTable', 2)">Failures</th>
+                                        <th onclick="sortTable('requirementMappingTable', 3)">Pass Rate %</th>
+                                        <th onclick="sortTable('requirementMappingTable', 4)">Locations</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="requirementMappingTableBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <div class="chart-container">
+                        <div class="chart-title">Failed Requirements with Bus Flips</div>
+                        <div style="overflow-x: auto;">
+                        <table id="testCaseReqFailuresTable" class="data-table">
+                            <thead>
+                                <tr>
+                                    <th onclick="sortTable('testCaseReqFailuresTable', 0)">Requirement</th>
+                                    <th onclick="sortTable('testCaseReqFailuresTable', 1)">Test Case</th>
+                                    <th onclick="sortTable('testCaseReqFailuresTable', 2)">Location</th>
+                                    <th onclick="sortTable('testCaseReqFailuresTable', 3)">Msg Types Tested</th>
+                                    <th onclick="sortTable('testCaseReqFailuresTable', 4)">Instance Flips</th>
+                                    <th onclick="sortTable('testCaseReqFailuresTable', 5)">Unique Flips</th>
+                                    <th onclick="sortTable('testCaseReqFailuresTable', 6)">Flips Near Failure</th>
+                                    <th onclick="sortTable('testCaseReqFailuresTable', 7)">Closest Flip (s)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="testCaseReqFailuresTableBody"></tbody>
+                        </table>
                         </div>
                     </div>
                 </div>
@@ -2403,7 +2904,7 @@ def create_interactive_dashboard(self):
                     <div class="chart-container">
                         <div class="chart-title">Single vs Multi-Word Change Distribution</div>
                         <div class="info-box">
-                            <strong>Change Types:</strong> Shows the distribution of single-word vs multi-word changes across ALL message types with issues.
+                            <strong>Change Types:</strong> Shows the distribution of single-word vs multi-word changes across message types.
                             Multi-word changes often indicate more severe issues.
                         </div>
                         <div id="singleVsMultiChart"></div>
@@ -2412,7 +2913,7 @@ def create_interactive_dashboard(self):
                     <div class="chart-container">
                         <div class="chart-title">Multi-Word Change Patterns</div>
                         <div class="info-box">
-                            <strong>Pattern Analysis:</strong> Heatmap showing which data words commonly change together in multi-word scenarios across message types.
+                            <strong>Pattern Analysis:</strong> Shows which data words commonly change together in multi-word scenarios.
                         </div>
                         <div id="multiWordPatternChart"></div>
                     </div>
@@ -2421,6 +2922,7 @@ def create_interactive_dashboard(self):
                         <div class="chart-title">Error Pattern Analysis (Enhanced)</div>
                         <div class="info-box">
                             <strong>Common Patterns:</strong> Shows the most frequent error patterns with single/multi-word change indicators.
+                            Helps identify systematic issues and pattern types.
                         </div>
                         <div id="errorPatternChart"></div>
                     </div>
@@ -2489,9 +2991,12 @@ def create_interactive_dashboard(self):
             const testCaseFlipData = {test_case_flip_data_json};
             const messageRatesData = {message_rates_data_json};
             const messageRatesByLocation = {message_rates_by_location_json};
+            const failedRequirementsData = {failed_requirements_data_json};
             const requirementsAtRiskData = {requirements_at_risk_data_json};
             const dataWordData = {data_word_data_json};
-            
+            const testCaseRequirementsData = {test_case_requirements_data_json};  // NEW
+            const requirementMappingData = {requirement_mapping_data_json};  // NEW
+
             // Filtered data
             let filteredFlipsData = [...allFlipsData];
             let filteredTestCaseData = [...testCaseData];
@@ -2499,6 +3004,7 @@ def create_interactive_dashboard(self):
             let filteredMessageRatesByLocation = [...messageRatesByLocation];
             let filteredRequirementsData = [...requirementsAtRiskData];
             let filteredDataWordData = [...dataWordData];
+            let filteredTestCaseRequirements = [...testCaseRequirementsData];  // NEW
             
             // Unique values for filters
             const uniqueUnits = {unit_ids_json};
@@ -2506,6 +3012,7 @@ def create_interactive_dashboard(self):
             const uniqueSaves = {saves_json};
             const uniqueMsgTypes = {msg_types_json};
             const uniqueTestCases = {test_case_ids_json};
+            const uniqueRequirements = {requirement_names_json};  // NEW
             
             // Helper function to parse test case names and handle deduplication
             function parseTestCaseName(testCaseId) {{
@@ -2692,7 +3199,7 @@ def create_interactive_dashboard(self):
                         (!testCaseFilter || row.test_case_id === testCaseFilter);
                 }});
                 
-                // FIXED: Filter message rates by location properly
+                // Filter message rates by location
                 filteredMessageRatesByLocation = messageRatesByLocation.filter(row => {{
                     return (!unitFilter || row.unit_id === unitFilter) &&
                         (!stationFilter || row.station === stationFilter) &&
@@ -2700,12 +3207,27 @@ def create_interactive_dashboard(self):
                         (!msgTypeFilter || row.msg_type === msgTypeFilter);
                 }});
                 
-                // Filter requirements data
+                // Filter message rates data for summary
+                if (msgTypeFilter) {{
+                    filteredMessageRatesData = messageRatesData.filter(row => row.msg_type === msgTypeFilter);
+                }} else {{
+                    filteredMessageRatesData = [...messageRatesData];
+                }}
+
+                // Filter universal requirements data (requirements at risk)
                 filteredRequirementsData = requirementsAtRiskData.filter(row => {{
                     return (!unitFilter || row.unit_id === unitFilter) &&
                         (!stationFilter || row.station === stationFilter) &&
                         (!saveFilter || row.save === saveFilter) &&
                         (!msgTypeFilter || row.msg_type_affected === msgTypeFilter);
+                }});                
+
+                filteredTestCaseRequirements = testCaseRequirementsData.filter(row => {{
+                    return (!unitFilter || row.unit_id === unitFilter) &&
+                        (!stationFilter || row.station === stationFilter) &&
+                        (!saveFilter || row.save === saveFilter) &&
+                        // NO requirement filter check here
+                        (!testCaseFilter || row.test_case_id === testCaseFilter);
                 }});
                 
                 // Filter data word data
@@ -2963,7 +3485,7 @@ def create_interactive_dashboard(self):
                     return;
                 }}
                 
-                // Timeline chart WITHOUT threshold line
+                // Timeline chart without threshold line
                 const timestamps = filteredFlipsData.map(d => parseFloat(d.timestamp_busA)).sort((a, b) => a - b);
                 
                 // Create bins for histogram
@@ -3014,7 +3536,6 @@ def create_interactive_dashboard(self):
                 // Color bars based on if they're spikes
                 const colors = bins.map(count => count > threshold ? '#e74c3c' : '#3498db');
                 
-                // No threshold line - just the bars
                 Plotly.newPlot('timelineChart', [{{
                     x: binLabels,
                     y: bins,
@@ -3081,39 +3602,32 @@ def create_interactive_dashboard(self):
                     
                     tableHtml += '</tbody></table>';
                     document.getElementById('testCaseSummaryTable').innerHTML = tableHtml;
-                    
-                    // NEW: Test Case Location Details Table
-                    const locationDetails = {{}};
-                    
+                }} else {{
+                    document.getElementById('testCaseSummaryTable').innerHTML = '<p>No test case data available</p>';
+                }}
+                
+                // Test Case Execution by Location Table
+                if (filteredTestCaseData.length > 0) {{
+                    const locationGroups = {{}};
                     filteredTestCaseData.forEach(tc => {{
-                        const locationKey = `${{tc.unit_id}}-${{tc.station}}-${{tc.save}}`;
-                        if (!locationDetails[locationKey]) {{
-                            locationDetails[locationKey] = {{
+                        const key = `${{tc.unit_id}}-${{tc.station}}-${{tc.save}}`;
+                        if (!locationGroups[key]) {{
+                            locationGroups[key] = {{
                                 unit_id: tc.unit_id,
                                 station: tc.station,
                                 save: tc.save,
                                 testCases: new Set(),
-                                timeRanges: []
+                                totalFlips: 0,
+                                times: []
                             }};
                         }}
-                        
-                        // Parse base test case name
-                        const baseNames = parseTestCaseName(tc.test_case_id);
-                        baseNames.forEach(baseName => {{
-                            locationDetails[locationKey].testCases.add(baseName);
-                        }});
-                        
-                        if (tc.timestamp_start && tc.timestamp_end) {{
-                            locationDetails[locationKey].timeRanges.push({{
-                                start: parseFloat(tc.timestamp_start),
-                                end: parseFloat(tc.timestamp_end),
-                                testCaseId: tc.test_case_id
-                            }});
-                        }}
+                        locationGroups[key].testCases.add(tc.test_case_id);
+                        locationGroups[key].totalFlips += tc.total_bus_flips || 0;
+                        if (tc.timestamp_start) locationGroups[key].times.push(parseFloat(tc.timestamp_start));
+                        if (tc.timestamp_end) locationGroups[key].times.push(parseFloat(tc.timestamp_end));
                     }});
                     
-                    // Create location table
-                    let locationHtml = `
+                    let locationTableHtml = `
                         <table class="data-table">
                             <thead>
                                 <tr>
@@ -3121,43 +3635,40 @@ def create_interactive_dashboard(self):
                                     <th>Station</th>
                                     <th>Save</th>
                                     <th>Test Cases Run</th>
-                                    <th>Total Runs</th>
-                                    <th>Time Span</th>
+                                    <th>Total Bus Flips</th>
+                                    <th>Time Range</th>
                                 </tr>
                             </thead>
                             <tbody>`;
                     
-                    Object.entries(locationDetails)
-                        .sort((a, b) => a[0].localeCompare(b[0]))
-                        .forEach(([key, details]) => {{
-                            const testCaseList = Array.from(details.testCases).sort().join(', ');
-                            
-                            let timeSpan = '';
-                            if (details.timeRanges.length > 0) {{
-                                const minTime = Math.min(...details.timeRanges.map(r => r.start));
-                                const maxTime = Math.max(...details.timeRanges.map(r => r.end));
-                                const duration = ((maxTime - minTime) / 3600).toFixed(2); // Convert to hours
-                                timeSpan = `${{duration}} hours`;
-                            }}
-                            
-                            locationHtml += `
-                                <tr>
-                                    <td>${{details.unit_id}}</td>
-                                    <td>${{details.station}}</td>
-                                    <td>${{details.save}}</td>
-                                    <td style="font-size: 11px;">${{testCaseList}}</td>
-                                    <td>${{details.timeRanges.length}}</td>
-                                    <td>${{timeSpan}}</td>
-                                </tr>`;
-                        }});
+                    Object.values(locationGroups).forEach(loc => {{
+                        const testCaseList = Array.from(loc.testCases).join(', ');
+                        let timeRange = 'N/A';
+                        if (loc.times.length > 0) {{
+                            const minTime = Math.min(...loc.times);
+                            const maxTime = Math.max(...loc.times);
+                            const startDate = new Date(minTime * 1000).toLocaleString();
+                            const endDate = new Date(maxTime * 1000).toLocaleString();
+                            timeRange = `${{startDate}} - ${{endDate}}`;
+                        }}
+                        
+                        locationTableHtml += `
+                            <tr>
+                                <td>${{loc.unit_id}}</td>
+                                <td>${{loc.station}}</td>
+                                <td>${{loc.save}}</td>
+                                <td>${{testCaseList}}</td>
+                                <td>${{loc.totalFlips}}</td>
+                                <td>${{timeRange}}</td>
+                            </tr>`;
+                    }});
                     
-                    locationHtml += '</tbody></table>';
-                    document.getElementById('testCaseLocationTable').innerHTML = locationHtml;
+                    locationTableHtml += '</tbody></table>';
+                    document.getElementById('locationExecutionTable').innerHTML = locationTableHtml;
                 }} else {{
-                    document.getElementById('testCaseSummaryTable').innerHTML = '<p>No test case data available</p>';
-                    document.getElementById('testCaseLocationTable').innerHTML = '<p>No test case data available</p>';
+                    document.getElementById('locationExecutionTable').innerHTML = '<p>No test case execution data available</p>';
                 }}
-                
+
                 // Hourly distribution
                 const hourlyData = filteredFlipsData.map(d => {{
                     const date = new Date(parseFloat(d.timestamp_busA) * 1000);
@@ -3228,74 +3739,69 @@ def create_interactive_dashboard(self):
             }}
             
             function drawMessageRateCharts() {{
-                // FIXED: Message Rate Statistics - properly calculate Hz from filtered location data
+                // Message Rate Statistics - properly filtered
                 if (filteredMessageRatesByLocation.length > 0) {{
                     // Aggregate filtered data by message type
                     const msgTypeStats = {{}};
-                    
                     filteredMessageRatesByLocation.forEach(d => {{
                         if (!msgTypeStats[d.msg_type]) {{
                             msgTypeStats[d.msg_type] = {{
-                                all_rates_hz: [],
-                                all_times_ms: [],
-                                locations: new Set()
+                                rates_hz: [],
+                                times_ms: []
                             }};
                         }}
-                        
-                        // Use the pre-calculated Hz values from Python
-                        if (d.avg_hz && d.avg_hz > 0) {{
-                            msgTypeStats[d.msg_type].all_rates_hz.push(d.avg_hz);
+                        if (d.avg_time_diff_ms > 0) {{
+                            msgTypeStats[d.msg_type].rates_hz.push(1000 / d.avg_time_diff_ms);
+                            msgTypeStats[d.msg_type].times_ms.push(d.avg_time_diff_ms);
+                            
+                            // Add min/max for box plot
+                            if (d.min_time_diff_ms > 0) {{
+                                msgTypeStats[d.msg_type].rates_hz.push(1000 / d.min_time_diff_ms);
+                            }}
+                            if (d.max_time_diff_ms > 0) {{
+                                msgTypeStats[d.msg_type].rates_hz.push(1000 / d.max_time_diff_ms);
+                            }}
                         }}
-                        if (d.min_hz && d.min_hz > 0) {{
-                            msgTypeStats[d.msg_type].all_rates_hz.push(d.min_hz);
-                        }}
-                        if (d.max_hz && d.max_hz > 0) {{
-                            msgTypeStats[d.msg_type].all_rates_hz.push(d.max_hz);
-                        }}
-                        
-                        msgTypeStats[d.msg_type].locations.add(`${{d.unit_id}}-${{d.station}}-${{d.save}}`);
                     }});
                     
-                    // Create data for visualization
+                    // Create box plot data for top message types
+                    const boxData = [];
                     const barData = [];
                     
                     Object.entries(msgTypeStats).forEach(([msgType, stats]) => {{
-                        if (stats.all_rates_hz.length > 0) {{
-                            const sortedRates = stats.all_rates_hz.sort((a, b) => a - b);
+                        if (stats.rates_hz.length > 0) {{
+                            const avgHz = stats.rates_hz.reduce((a, b) => a + b, 0) / stats.rates_hz.length;
                             barData.push({{
                                 msgType: msgType,
-                                avgHz: stats.all_rates_hz.reduce((a, b) => a + b, 0) / stats.all_rates_hz.length,
-                                minHz: Math.min(...stats.all_rates_hz),
-                                maxHz: Math.max(...stats.all_rates_hz),
-                                medianHz: sortedRates[Math.floor(sortedRates.length / 2)],
-                                locationCount: stats.locations.size,
-                                sampleCount: stats.all_rates_hz.length
+                                avgHz: avgHz,
+                                minHz: Math.min(...stats.rates_hz),
+                                maxHz: Math.max(...stats.rates_hz),
+                                q1Hz: stats.rates_hz.sort((a, b) => a - b)[Math.floor(stats.rates_hz.length * 0.25)],
+                                q3Hz: stats.rates_hz.sort((a, b) => a - b)[Math.floor(stats.rates_hz.length * 0.75)],
+                                medianHz: stats.rates_hz.sort((a, b) => a - b)[Math.floor(stats.rates_hz.length * 0.5)]
                             }});
                         }}
                     }});
                     
-                    // Sort by max Hz and get top 20
-                    const topTypes = barData.sort((a, b) => b.maxHz - a.maxHz).slice(0, 20);
+                    // Sort and get top 20
+                    const topTypes = barData.sort((a, b) => b.avgHz - a.avgHz).slice(0, 20);
                     
-                    if (topTypes.length > 8) {{
-                        // Use box plot for many message types
-                        const boxData = [];
-                        topTypes.forEach(type => {{
-                            const rates = msgTypeStats[type.msgType].all_rates_hz;
-                            if (rates.length > 0) {{
-                                boxData.push({{
-                                    y: rates,
-                                    type: 'box',
-                                    name: type.msgType,
-                                    boxmean: true,
-                                    marker: {{
-                                        color: type.maxHz > 1000 ? '#e74c3c' :
-                                            type.avgHz > 100 ? '#f39c12' : '#3498db'
-                                    }}
-                                }});
+                    // Create box plot traces
+                    topTypes.forEach(type => {{
+                        boxData.push({{
+                            y: msgTypeStats[type.msgType].rates_hz,
+                            type: 'box',
+                            name: type.msgType,
+                            boxmean: true,
+                            marker: {{
+                                color: type.avgHz > 1000 ? '#e74c3c' :
+                                    type.avgHz > 100 ? '#f39c12' : '#3498db'
                             }}
                         }});
-                        
+                    }});
+                    
+                    if (boxData.length > 5) {{
+                        // Use box plot for many message types
                         Plotly.newPlot('messageRateStats', boxData, {{
                             margin: {{ t: 10, b: 100, l: 60, r: 20 }},
                             xaxis: {{ title: 'Message Type', tickangle: -45 }},
@@ -3316,15 +3822,12 @@ def create_interactive_dashboard(self):
                             type: 'bar',
                             marker: {{
                                 color: topTypes.map(d => 
-                                    d.maxHz > 1000 ? '#e74c3c' :
+                                    d.avgHz > 1000 ? '#e74c3c' :
                                     d.avgHz > 100 ? '#f39c12' : '#3498db'
                                 )
                             }},
-                            text: topTypes.map(d => `Max: ${{d.maxHz.toFixed(1)}} Hz`),
-                            textposition: 'auto',
-                            hovertemplate: 'Type: %{{x}}<br>Avg: %{{y:.1f}} Hz<br>Max: %{{customdata:.1f}} Hz<br>Locations: %{{meta}}<extra></extra>',
-                            customdata: topTypes.map(d => d.maxHz),
-                            meta: topTypes.map(d => d.locationCount)
+                            text: topTypes.map(d => `${{d.avgHz.toFixed(1)}} Hz`),
+                            textposition: 'auto'
                         }}], {{
                             margin: {{ t: 10, b: 100, l: 60, r: 20 }},
                             xaxis: {{ title: 'Message Type', tickangle: -45 }},
@@ -3335,7 +3838,7 @@ def create_interactive_dashboard(self):
                     document.getElementById('messageRateStats').innerHTML = '<p>No message rate data available for current filter</p>';
                 }}
                 
-                // Station Rate Summary
+                // Station Rate Summary - Proper aggregation
                 if (filteredMessageRatesByLocation.length > 0) {{
                     const stationStats = {{}};
                     
@@ -3350,8 +3853,8 @@ def create_interactive_dashboard(self):
                                 msgTypes: new Set()
                             }};
                         }}
-                        if (d.max_hz) {{
-                            stationStats[key].rates.push(d.max_hz);
+                        if (d.msg_per_sec) {{
+                            stationStats[key].rates.push(d.msg_per_sec);
                             stationStats[key].msgTypes.add(d.msg_type);
                         }}
                     }});
@@ -3397,11 +3900,11 @@ def create_interactive_dashboard(self):
                     }}], {{
                         margin: {{ t: 10, b: 60, l: 60, r: 20 }},
                         xaxis: {{ title: 'Station' }},
-                        yaxis: {{ title: 'Sampling Rate (Hz)', type: 'log' }},
+                        yaxis: {{ title: 'Messages per Second', type: 'log' }},
                         barmode: 'group'
                     }});
                     
-                    // High-frequency Station-Save combinations - Properly calculated per save
+                    // High-frequency Station-Save combinations - Properly calculated
                     const comboStats = {{}};
                     
                     // Group properly by station-save-msgtype
@@ -3415,8 +3918,8 @@ def create_interactive_dashboard(self):
                                 rates: []
                             }};
                         }}
-                        if (d.max_hz) {{
-                            comboStats[key].rates.push(d.max_hz);
+                        if (d.msg_per_sec) {{
+                            comboStats[key].rates.push(d.msg_per_sec);
                         }}
                     }});
                     
@@ -3448,20 +3951,20 @@ def create_interactive_dashboard(self):
                                 d.maxRate > 100 ? '#f39c12' : '#27ae60'
                             )
                         }},
-                        text: topHighFreq.map(d => `Max: ${{d.maxRate.toFixed(1)}} Hz`),
-                        hovertemplate: '%{{x}}<br>Max Rate: %{{y:.1f}} Hz<br>%{{text}}<extra></extra>'
+                        text: topHighFreq.map(d => `Max: ${{d.maxRate.toFixed(1)}} msg/s`),
+                        hovertemplate: '%{{x}}<br>Max Rate: %{{y:.1f}} msg/s<br>%{{text}}<extra></extra>'
                     }}], {{
                         margin: {{ t: 10, b: 120, l: 60, r: 20 }},
                         xaxis: {{ title: 'Station-Save [Message Type]', tickangle: -45 }},
-                        yaxis: {{ title: 'Max Sampling Rate (Hz)', type: 'log' }}
+                        yaxis: {{ title: 'Max Messages per Second', type: 'log' }}
                     }});
                 }}
                 
                 // Rate metrics
                 if (filteredMessageRatesByLocation.length > 0) {{
                     const allRates = filteredMessageRatesByLocation
-                        .filter(d => d.max_hz)
-                        .map(d => d.max_hz);
+                        .filter(d => d.msg_per_sec)
+                        .map(d => d.msg_per_sec);
                         
                     if (allRates.length > 0) {{
                         const criticalCount = allRates.filter(r => r > 1000).length;
@@ -3474,24 +3977,24 @@ def create_interactive_dashboard(self):
                                 <div class="metric-value">${{filteredMessageRatesByLocation.length}}</div>
                             </div>
                             <div class="metric-card">
-                                <div class="metric-title">Critical Rate (>1kHz)</div>
+                                <div class="metric-title">Critical Rate (>1000 msg/s)</div>
                                 <div class="metric-value" style="color: #e74c3c;">${{criticalCount}}</div>
                             </div>
                             <div class="metric-card">
-                                <div class="metric-title">Warning Rate (100-1000 Hz)</div>
+                                <div class="metric-title">Warning Rate (100-1000 msg/s)</div>
                                 <div class="metric-value" style="color: #f39c12;">${{warningCount}}</div>
                             </div>
                             <div class="metric-card">
-                                <div class="metric-title">Normal Rate (<100 Hz)</div>
+                                <div class="metric-title">Normal Rate (<100 msg/s)</div>
                                 <div class="metric-value" style="color: #27ae60;">${{normalCount}}</div>
                             </div>
                             <div class="metric-card">
                                 <div class="metric-title">Highest Rate</div>
-                                <div class="metric-value">${{Math.max(...allRates).toFixed(1)}} Hz</div>
+                                <div class="metric-value">${{Math.max(...allRates).toFixed(1)}} msg/s</div>
                             </div>
                             <div class="metric-card">
                                 <div class="metric-title">Median Rate</div>
-                                <div class="metric-value">${{allRates.sort((a,b) => a-b)[Math.floor(allRates.length/2)].toFixed(1)}} Hz</div>
+                                <div class="metric-value">${{allRates.sort((a,b) => a-b)[Math.floor(allRates.length/2)].toFixed(1)}} msg/s</div>
                             </div>
                         `;
                         document.getElementById('rateMetrics').innerHTML = metricsHtml;
@@ -3607,7 +4110,7 @@ def create_interactive_dashboard(self):
                         
                         row.insertCell(0).textContent = group.baseName;
                         row.insertCell(1).textContent = group.totalFlips;
-                        row.insertCell(2).textContent = group.uniqueRuns;
+                        row.insertCell(2).textContent = group.instances.length;
                         row.insertCell(3).textContent = group.avgFlipsPerRun;
                         row.insertCell(4).textContent = group.uniqueMsgTypes.size;
                         row.insertCell(5).textContent = group.uniqueLocations.size;
@@ -3616,72 +4119,164 @@ def create_interactive_dashboard(self):
             }}
             
             function drawRequirementsCharts() {{
-                if (filteredRequirementsData.length === 0) {{
-                    document.getElementById('requirementsChart').innerHTML = '<p>No requirements data available</p>';
-                    return;
+                // UNIVERSAL REQUIREMENTS SECTION
+                if (filteredRequirementsData.length > 0) {{
+                    // Aggregate by requirement name
+                    const reqSummary = {{}};
+                    
+                    filteredRequirementsData.forEach(r => {{
+                        if (!reqSummary[r.requirement_name]) {{
+                            reqSummary[r.requirement_name] = {{
+                                flipCount: 0,
+                                msgTypes: new Set(),
+                                testCases: new Set(),
+                                locations: new Set()
+                            }};
+                        }}
+                        reqSummary[r.requirement_name].flipCount += r.flip_count;
+                        reqSummary[r.requirement_name].msgTypes.add(r.msg_type_affected);
+                        reqSummary[r.requirement_name].locations.add(`${{r.unit_id}}/${{r.station}}/${{r.save}}`);
+                        
+                        if (r.test_case_ids && r.test_case_ids !== 'N/A') {{
+                            const tcIds = r.test_case_ids.toString().split(/[,;\s]+/);
+                            tcIds.forEach(tc => {{
+                                const trimmed = tc.trim();
+                                if (trimmed && trimmed !== 'N/A') {{
+                                    reqSummary[r.requirement_name].testCases.add(trimmed);
+                                }}
+                            }});
+                        }}
+                    }});
+                    
+                    const reqData = Object.entries(reqSummary).map(([name, data]) => ({{
+                        name: name,
+                        flips: data.flipCount,
+                        msgTypes: data.msgTypes.size,
+                        testCases: data.testCases.size,
+                        locations: data.locations.size
+                    }})).sort((a, b) => b.flips - a.flips).slice(0, 20);
+                    
+                    Plotly.newPlot('universalRequirementsChart', [{{
+                        x: reqData.map(d => d.name),
+                        y: reqData.map(d => d.flips),
+                        type: 'bar',
+                        marker: {{ color: '#e74c3c' }},
+                        text: reqData.map(d => `${{d.testCases}} test cases, ${{d.msgTypes}} msg types`),
+                        hovertemplate: '%{{x}}<br>Flips: %{{y}}<br>%{{text}}<extra></extra>'
+                    }}], {{
+                        margin: {{ t: 10, b: 120, l: 60, r: 20 }},
+                        xaxis: {{ title: 'Universal Requirement Name', tickangle: -45 }},
+                        yaxis: {{ title: 'Total Bus Flips' }}
+                    }});
+                    
+                    // Populate universal requirements table
+                    const tableBody = document.getElementById('universalRequirementsTableBody');
+                    tableBody.innerHTML = '';
+                    
+                    filteredRequirementsData.slice(0, 100).forEach(r => {{
+                        const row = tableBody.insertRow();
+                        row.insertCell(0).textContent = r.requirement_name || '';
+                        row.insertCell(1).textContent = `${{r.unit_id}}/${{r.station}}/${{r.save}}`;
+                        row.insertCell(2).textContent = r.msg_type_affected || '';
+                        row.insertCell(3).textContent = r.flip_count || 0;
+                        row.insertCell(4).textContent = r.test_cases_affected || '0';
+                        row.insertCell(5).textContent = r.test_case_ids || 'None';
+                    }});
+                }} else {{
+                    document.getElementById('universalRequirementsChart').innerHTML = '<p>No universal requirements data available</p>';
+                    document.getElementById('universalRequirementsTableBody').innerHTML = '';
                 }}
                 
-                // Aggregate by requirement name
-                const reqSummary = {{}};
-                
-                filteredRequirementsData.forEach(r => {{
-                    if (!reqSummary[r.requirement_name]) {{
-                        reqSummary[r.requirement_name] = {{
-                            flipCount: 0,
-                            msgTypes: new Set(),
-                            testCases: new Set(),
-                            locations: new Set()
-                        }};
-                    }}
-                    reqSummary[r.requirement_name].flipCount += r.flip_count;
-                    reqSummary[r.requirement_name].msgTypes.add(r.msg_type_affected);
-                    reqSummary[r.requirement_name].locations.add(`${{r.unit_id}}/${{r.station}}/${{r.save}}`);
+                // TEST CASE SPECIFIC REQUIREMENTS SECTION
+                if (filteredTestCaseRequirements.length > 0) {{
+                    // Group by requirement for chart - USE UNIQUE COUNTS
+                    const tcReqSummary = {{}};
+                    const uniqueFlipTracker = {{}};  // Track unique flips per requirement
                     
-                    if (r.test_case_ids && r.test_case_ids !== 'N/A') {{
-                        const tcIds = r.test_case_ids.toString().split(/[,;\\s]+/);
-                        tcIds.forEach(tc => {{
-                            const trimmed = tc.trim();
-                            if (trimmed && trimmed !== 'N/A') {{
-                                reqSummary[r.requirement_name].testCases.add(trimmed);
-                            }}
-                        }});
-                    }}
-                }});
+                    filteredTestCaseRequirements.forEach(r => {{
+                        if (!tcReqSummary[r.requirement_name]) {{
+                            tcReqSummary[r.requirement_name] = {{
+                                totalFlips: 0,
+                                nearFlips: 0,
+                                testCases: new Set()
+                            }};
+                            uniqueFlipTracker[r.requirement_name] = new Set();
+                        }}
+                        
+                        // Use unique_flip_count if available, otherwise use flip_count
+                        const uniqueFlips = r.unique_flip_count || r.flip_count || 0;
+                        
+                        // Track the maximum unique flip count seen for this requirement
+                        if (uniqueFlips > tcReqSummary[r.requirement_name].totalFlips) {{
+                            tcReqSummary[r.requirement_name].totalFlips = uniqueFlips;
+                        }}
+                        
+                        tcReqSummary[r.requirement_name].nearFlips += r.flips_near_failure || 0;
+                        tcReqSummary[r.requirement_name].testCases.add(r.test_case_id);
+                    }});
+                    
+                    const tcReqData = Object.entries(tcReqSummary).map(([name, data]) => ({{
+                        name: name,
+                        totalFlips: data.totalFlips,  // Now using unique count
+                        nearFlips: data.nearFlips,
+                        testCases: data.testCases.size
+                    }})).sort((a, b) => b.nearFlips - a.nearFlips).slice(0, 20);
+                    
+                    Plotly.newPlot('testCaseRequirementsChart', [{{
+                        x: tcReqData.map(d => d.name),
+                        y: tcReqData.map(d => d.nearFlips),
+                        name: 'Flips Near Failure',
+                        type: 'bar',
+                        marker: {{ color: '#e74c3c' }}
+                    }}, {{
+                        x: tcReqData.map(d => d.name),
+                        y: tcReqData.map(d => d.totalFlips),
+                        name: 'Total Unique Flips',
+                        type: 'bar',
+                        marker: {{ color: '#f39c12' }}
+                    }}], {{
+                        margin: {{ t: 10, b: 120, l: 60, r: 20 }},
+                        xaxis: {{ title: 'Test Case Requirement', tickangle: -45 }},
+                        yaxis: {{ title: 'Bus Flip Count' }},
+                        barmode: 'group'
+                    }});
+                    
+                    // Populate failures table
+                    const failuresTableBody = document.getElementById('testCaseReqFailuresTableBody');
+                    failuresTableBody.innerHTML = '';
+                    
+                    filteredTestCaseRequirements.slice(0, 100).forEach(r => {{
+                        const row = failuresTableBody.insertRow();
+                        row.insertCell(0).textContent = r.requirement_name || '';
+                        row.insertCell(1).textContent = r.test_case_id || '';
+                        row.insertCell(2).textContent = `${{r.unit_id}}/${{r.station}}/${{r.save}}`;
+                        row.insertCell(3).textContent = r.msg_types_tested || '';
+                        row.insertCell(4).textContent = r.flip_count || 0;  // This instance
+                        row.insertCell(5).textContent = r.unique_flip_count || 0;  // Across all instances
+                        row.insertCell(6).textContent = r.flips_near_failure || 0;
+                        row.insertCell(7).textContent = r.closest_flip_time_diff ? r.closest_flip_time_diff.toFixed(3) : 'N/A';
+                    }});
+                }} else {{
+                    document.getElementById('testCaseRequirementsChart').innerHTML = '<p>No test case requirement failures with bus flips</p>';
+                    document.getElementById('testCaseReqFailuresTableBody').innerHTML = '';
+                }}
                 
-                const reqData = Object.entries(reqSummary).map(([name, data]) => ({{
-                    name: name,
-                    flips: data.flipCount,
-                    msgTypes: data.msgTypes.size,
-                    testCases: data.testCases.size,
-                    locations: data.locations.size
-                }})).sort((a, b) => b.flips - a.flips).slice(0, 20);
-                
-                Plotly.newPlot('requirementsChart', [{{
-                    x: reqData.map(d => d.name),
-                    y: reqData.map(d => d.flips),
-                    type: 'bar',
-                    marker: {{ color: '#e74c3c' }},
-                    text: reqData.map(d => `${{d.testCases}} test cases, ${{d.msgTypes}} msg types`),
-                    hovertemplate: '%{{x}}<br>Flips: %{{y}}<br>%{{text}}<extra></extra>'
-                }}], {{
-                    margin: {{ t: 10, b: 120, l: 60, r: 20 }},
-                    xaxis: {{ title: 'Requirement Name', tickangle: -45 }},
-                    yaxis: {{ title: 'Total Bus Flips' }}
-                }});
-                
-                // Populate requirements table
-                const tableBody = document.getElementById('requirementsTableBody');
-                tableBody.innerHTML = '';
-                
-                filteredRequirementsData.slice(0, 100).forEach(r => {{
-                    const row = tableBody.insertRow();
-                    row.insertCell(0).textContent = r.requirement_name || '';
-                    row.insertCell(1).textContent = `${{r.unit_id}}/${{r.station}}/${{r.save}}`;
-                    row.insertCell(2).textContent = r.msg_type_affected || '';
-                    row.insertCell(3).textContent = r.flip_count || 0;
-                    row.insertCell(4).textContent = r.test_cases_affected || '0';
-                    row.insertCell(5).textContent = r.test_case_ids || 'None';
-                }});
+                // REQUIREMENT-TEST CASE MAPPING
+                if (requirementMappingData.length > 0) {{
+                    const mappingTableBody = document.getElementById('requirementMappingTableBody');
+                    mappingTableBody.innerHTML = '';
+                    
+                    requirementMappingData.slice(0, 100).forEach(r => {{
+                        const row = mappingTableBody.insertRow();
+                        row.insertCell(0).textContent = r.requirement_name || '';
+                        row.insertCell(1).textContent = r.test_cases || '';
+                        row.insertCell(2).textContent = r.total_failed || 0;
+                        row.insertCell(3).textContent = r.pass_rate ? r.pass_rate.toFixed(1) + '%' : '0%';
+                        row.insertCell(4).textContent = `${{r.unique_units}}U/${{r.unique_stations}}S/${{r.unique_saves}}Sv`;
+                    }});
+                }} else {{
+                    document.getElementById('requirementMappingTableBody').innerHTML = '';
+                }}
             }}
             
             function drawDataWordCharts() {{
@@ -3690,7 +4285,7 @@ def create_interactive_dashboard(self):
                     return;
                 }}
                 
-                // EXPANDED: Single vs Multi-Word Change Distribution - Show ALL message types
+                // Single vs Multi-Word Change Distribution
                 const singleMultiData = {{}};
                 filteredDataWordData.forEach(d => {{
                     if (!singleMultiData[d.msg_type]) {{
@@ -3705,37 +4300,31 @@ def create_interactive_dashboard(self):
                     singleMultiData[d.msg_type].total += d.total_issues || 0;
                 }});
                 
-                // Show ALL message types with issues
                 const msgTypes = Object.keys(singleMultiData).sort((a, b) => 
                     singleMultiData[b].total - singleMultiData[a].total
-                );
-                
-                // If too many, show top 25 with indicator
-                const displayTypes = msgTypes.length > 25 ? msgTypes.slice(0, 25) : msgTypes;
-                const chartTitle = msgTypes.length > 25 ? 
-                    `Message Type (Top 25 of ${{msgTypes.length}} total)` : 'Message Type';
+                ).slice(0, 30);
                 
                 Plotly.newPlot('singleVsMultiChart', [{{
-                    x: displayTypes,
-                    y: displayTypes.map(mt => singleMultiData[mt].single),
+                    x: msgTypes,
+                    y: msgTypes.map(mt => singleMultiData[mt].single),
                     name: 'Single Word Changes',
                     type: 'bar',
                     marker: {{ color: '#3498db' }}
                 }}, {{
-                    x: displayTypes,
-                    y: displayTypes.map(mt => singleMultiData[mt].multi),
+                    x: msgTypes,
+                    y: msgTypes.map(mt => singleMultiData[mt].multi),
                     name: 'Multi Word Changes',
                     type: 'bar',
                     marker: {{ color: '#e74c3c' }}
                 }}], {{
                     barmode: 'stack',
                     margin: {{ t: 10, b: 100, l: 60, r: 20 }},
-                    xaxis: {{ title: chartTitle, tickangle: -45 }},
+                    xaxis: {{ title: 'Message Type', tickangle: -45 }},
                     yaxis: {{ title: 'Number of Changes' }},
                     hovermode: 'x unified'
                 }});
                 
-                // EXPANDED: Multi-Word Change Patterns Heatmap
+                // Multi-Word Change Patterns - Heatmap
                 const multiWordPatterns = {{}};
                 filteredDataWordData.forEach(d => {{
                     if (d.multi_word_changes > 0 && d.data_word) {{
@@ -3748,28 +4337,31 @@ def create_interactive_dashboard(self):
                         multiWordPatterns[d.msg_type][d.data_word] += d.multi_word_changes;
                     }}
                 }});
-                
-                // Show MORE message types in heatmap
+                // Collect all unique data words
+                const allDataWords = new Set();
+                filteredDataWordData.forEach(d => {{
+                    if (d.data_word) {{
+                        allDataWords.add(d.data_word);
+                    }}
+                }});
+                // Create heatmap data
                 const heatmapMsgTypes = Object.keys(multiWordPatterns)
                     .sort((a, b) => {{
                         const sumA = Object.values(multiWordPatterns[a]).reduce((s, v) => s + v, 0);
                         const sumB = Object.values(multiWordPatterns[b]).reduce((s, v) => s + v, 0);
                         return sumB - sumA;
                     }})
-                    .slice(0, Math.min(30, Object.keys(multiWordPatterns).length)); // Show up to 30
-                
-                // Get top data words across all message types
-                const dataWordTotals = {{}};
-                Object.values(multiWordPatterns).forEach(msgTypeData => {{
-                    Object.entries(msgTypeData).forEach(([word, count]) => {{
-                        dataWordTotals[word] = (dataWordTotals[word] || 0) + count;
-                    }});
-                }});
-                
-                const heatmapDataWords = Object.entries(dataWordTotals)
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 30) // Show top 30 data words
-                    .map(([word]) => word);
+                    .slice(0, 25);
+                const heatmapDataWords = Array.from(allDataWords)
+                    .sort((a, b) => {{
+                        let sumA = 0, sumB = 0;
+                        Object.values(multiWordPatterns).forEach(dw => {{
+                            sumA += dw[a] || 0;
+                            sumB += dw[b] || 0;
+                        }});
+                        return sumB - sumA;
+                    }})
+                    .slice(0, 30);
                 
                 const zValues = [];
                 heatmapMsgTypes.forEach(mt => {{
@@ -3791,17 +4383,13 @@ def create_interactive_dashboard(self):
                     }}], {{
                         margin: {{ t: 10, b: 100, l: 100, r: 40 }},
                         xaxis: {{ title: 'Data Word', tickangle: -45 }},
-                        yaxis: {{ title: `Message Type (Showing ${{heatmapMsgTypes.length}} of ${{Object.keys(multiWordPatterns).length}})` }},
-                        height: Math.max(500, heatmapMsgTypes.length * 20) // Dynamic height
+                        yaxis: {{ title: 'Message Type' }}
                     }});
                 }} else {{
                     document.getElementById('multiWordPatternChart').innerHTML = '<p>No multi-word patterns found</p>';
                 }}
                 
-                // Rest of data word charts remain the same...
-                // Error patterns, speed analysis, metrics, and tables
-                
-                // Error Pattern Analysis
+                // Enhanced Error Pattern Analysis
                 const patternCounts = {{}};
                 const patternTypes = {{}};
                 
@@ -3810,10 +4398,14 @@ def create_interactive_dashboard(self):
                         const pattern = `${{d.msg_type}}: ${{d.most_common_error}}`;
                         if (!patternCounts[pattern]) {{
                             patternCounts[pattern] = 0;
-                            patternTypes[pattern] = {{ single: 0, multi: 0 }};
+                            patternTypes[pattern] = {{
+                                single: 0,
+                                multi: 0
+                            }};
                         }}
                         patternCounts[pattern] += d.most_common_count || d.total_issues;
                         
+                        // Track if this pattern occurs as single or multi-word change
                         if (d.single_word_changes > d.multi_word_changes) {{
                             patternTypes[pattern].single += d.single_word_changes;
                         }} else {{
@@ -3824,15 +4416,21 @@ def create_interactive_dashboard(self):
                 
                 const topPatterns = Object.entries(patternCounts)
                     .sort((a, b) => b[1] - a[1])
-                    .slice(0, 20);
+                    .slice(0, 30);
                 
+                // Create enhanced bar chart with single/multi indicators
                 const patternData = topPatterns.map(([pattern, count]) => {{
                     const types = patternTypes[pattern];
                     const changeType = types.single > types.multi ? 'Single' : 'Multi';
                     const percentage = types.single > types.multi ? 
                         Math.round((types.single / (types.single + types.multi)) * 100) :
                         Math.round((types.multi / (types.single + types.multi)) * 100);
-                    return {{ pattern, count, changeType, percentage }};
+                    return {{
+                        pattern: pattern,
+                        count: count,
+                        changeType: changeType,
+                        percentage: percentage
+                    }};
                 }});
                 
                 Plotly.newPlot('errorPatternChart', [{{
@@ -3849,7 +4447,7 @@ def create_interactive_dashboard(self):
                     margin: {{ t: 40, b: 60, l: 200, r: 60 }},
                     xaxis: {{ title: 'Frequency' }},
                     yaxis: {{ title: 'Error Pattern' }},
-                    height: 500,
+                    height: 800,
                     title: {{ 
                         text: 'Blue = Single-word, Red = Multi-word',
                         x: 0.5,
@@ -3859,12 +4457,12 @@ def create_interactive_dashboard(self):
                     }}
                 }});
                 
-                # Change Speed Analysis
+                // Change Speed Analysis
                 const speedData = {{
                     single: [],
                     multi: []
                 }};
-
+                
                 filteredDataWordData.forEach(d => {{
                     if (d.avg_flip_speed_ms && d.avg_flip_speed_ms > 0) {{
                         if (d.single_word_changes > d.multi_word_changes) {{
@@ -3874,7 +4472,7 @@ def create_interactive_dashboard(self):
                         }}
                     }}
                 }});
-
+                
                 const traces = [];
                 if (speedData.single.length > 0) {{
                     traces.push({{
@@ -3894,7 +4492,7 @@ def create_interactive_dashboard(self):
                         boxmean: true
                     }});
                 }}
-
+                
                 if (traces.length > 0) {{
                     Plotly.newPlot('changeSpeedChart', traces, {{
                         margin: {{ t: 10, b: 60, l: 60, r: 20 }},
@@ -3904,23 +4502,32 @@ def create_interactive_dashboard(self):
                 }} else {{
                     document.getElementById('changeSpeedChart').innerHTML = '<p>No speed data available</p>';
                 }}
-
-                // Data Word Statistics
+                
+                // Calculate metrics
                 const totalIssues = filteredDataWordData.reduce((sum, d) => sum + d.total_issues, 0);
                 const uniqueDataWords = new Set(filteredDataWordData.map(d => d.data_word)).size;
                 const uniqueMsgTypes = new Set(filteredDataWordData.map(d => d.msg_type)).size;
-
+                
                 let singleWordIssues = 0;
                 let multiWordIssues = 0;
-
+                let fastestFlip = Infinity;
+                let avgFlipSpeed = 0;
+                let speedCount = 0;
+                
                 filteredDataWordData.forEach(d => {{
                     singleWordIssues += d.single_word_changes || 0;
                     multiWordIssues += d.multi_word_changes || 0;
+                    if (d.avg_flip_speed_ms && d.avg_flip_speed_ms > 0) {{
+                        fastestFlip = Math.min(fastestFlip, d.avg_flip_speed_ms);
+                        avgFlipSpeed += d.avg_flip_speed_ms;
+                        speedCount++;
+                    }}
                 }});
-
+                
+                avgFlipSpeed = speedCount > 0 ? (avgFlipSpeed / speedCount) : 0;
                 const multiWordPercent = (singleWordIssues + multiWordIssues) > 0 ? 
                     ((multiWordIssues / (singleWordIssues + multiWordIssues)) * 100) : 0;
-
+                
                 const metricsHtml = `
                     <div class="metric-card">
                         <div class="metric-title">Total Data Word Issues</div>
@@ -3948,8 +4555,8 @@ def create_interactive_dashboard(self):
                     </div>
                 `;
                 document.getElementById('dataWordMetrics').innerHTML = metricsHtml;
-
-                // Interactive Pivot Table
+                
+                // Populate interactive pivot table
                 const pivotData = {{}};
                 filteredDataWordData.forEach(d => {{
                     if (!pivotData[d.msg_type]) {{
@@ -3975,17 +4582,14 @@ def create_interactive_dashboard(self):
                         }}
                     }}
                     
-                    if (d.single_word_changes > 0) {{
-                        pivotData[d.msg_type].wordCounts.push(1);
-                    }}
-                    if (d.multi_word_changes > 0) {{
-                        pivotData[d.msg_type].wordCounts.push(2.5);
+                    if (d.num_data_changes) {{
+                        pivotData[d.msg_type].wordCounts.push(d.num_data_changes);
                     }}
                 }});
-
+                
                 const pivotBody = document.getElementById('dataWordPivotBody');
                 pivotBody.innerHTML = '';
-
+                
                 Object.entries(pivotData)
                     .sort((a, b) => b[1].total - a[1].total)
                     .forEach(([msgType, data]) => {{
@@ -4003,15 +4607,15 @@ def create_interactive_dashboard(self):
                         row.insertCell(6).textContent = data.patterns.size;
                         row.insertCell(7).textContent = data.topPattern || 'N/A';
                     }});
-
-                // Detailed Data Word Analysis Table
+                
+                // Populate data word table
                 const tableBody = document.getElementById('dataWordTableBody');
                 tableBody.innerHTML = '';
-
-                filteredDataWordData.forEach(d => {{
+                
+                filteredDataWordData.slice(0, 50).forEach(d => {{
                     const row = tableBody.insertRow();
                     const singleMulti = (d.single_word_changes || 0) > (d.multi_word_changes || 0) ? 'Single' : 'Multi';
-                    const locations = `${{d.affected_units || 0}}U/${{d.affected_stations || 0}}S/${{d.affected_saves || 0}}Sv`;
+                    const locations = `${{d.affected_units || 0}}U/${{d.affected_stations || 0}}S/${{d.affected_saves || 0}}S`;
                     
                     row.insertCell(0).textContent = d.msg_type || '';
                     row.insertCell(1).textContent = d.data_word || '';
@@ -4023,8 +4627,8 @@ def create_interactive_dashboard(self):
                 }});
             }}
             
-            function sortTable(tableId, column) {{
-                const table = document.getElementById(tableId);
+            function sortPivotTable(column) {{
+                const table = document.getElementById('dataWordPivotTable');
                 const tbody = table.querySelector('tbody');
                 const rows = Array.from(tbody.querySelectorAll('tr'));
                 
@@ -4032,6 +4636,14 @@ def create_interactive_dashboard(self):
                     const aVal = a.cells[column].textContent;
                     const bVal = b.cells[column].textContent;
                     
+                    // Handle percentages
+                    if (aVal.includes('%') && bVal.includes('%')) {{
+                        const aNum = parseFloat(aVal.replace('%', ''));
+                        const bNum = parseFloat(bVal.replace('%', ''));
+                        return bNum - aNum;
+                    }}
+                    
+                    // Try to parse as number
                     const aNum = parseFloat(aVal);
                     const bNum = parseFloat(bVal);
                     
@@ -4045,8 +4657,28 @@ def create_interactive_dashboard(self):
                 rows.forEach(row => tbody.appendChild(row));
             }}
             
-            function sortPivotTable(column) {{
-                sortTable('dataWordPivotTable', column);
+            function sortTable(tableId, column) {{
+                const table = document.getElementById(tableId);
+                const tbody = table.querySelector('tbody');
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                
+                rows.sort((a, b) => {{
+                    const aVal = a.cells[column].textContent;
+                    const bVal = b.cells[column].textContent;
+                    
+                    // Try to parse as number first
+                    const aNum = parseFloat(aVal);
+                    const bNum = parseFloat(bVal);
+                    
+                    if (!isNaN(aNum) && !isNaN(bNum)) {{
+                        return bNum - aNum; // Descending for numbers
+                    }}
+                    
+                    return aVal.localeCompare(bVal);
+                }});
+                
+                // Re-append sorted rows
+                rows.forEach(row => tbody.appendChild(row));
             }}
             
             // Initialize on page load
