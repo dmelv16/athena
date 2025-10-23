@@ -1,0 +1,228 @@
+def load_tca_files(self):
+    """Load all TCA CSV files and extract test case information"""
+    if not self.tca_folder.exists():
+        print(f"Note: TCA folder '{self.tca_folder}' does not exist")
+        return []
+    
+    tca_files = list(self.tca_folder.glob("*_tca-data.csv"))
+    
+    if not tca_files:
+        print(f"No TCA files found in {self.tca_folder}")
+        return []
+    
+    print(f"\nLoading {len(tca_files)} TCA files...")
+    
+    test_case_data = []
+    
+    for tca_file in tca_files:
+        try:
+            # Parse filename: RSFC_L1_4_tca-data.csv
+            parts = tca_file.stem.replace('_tca-data', '').split('_')
+            if len(parts) >= 3:
+                unit_id = parts[0]
+                station = parts[1]
+                save = parts[2]
+            else:
+                print(f"  Warning: Could not parse filename {tca_file.name}")
+                continue
+            
+            # Read TCA file
+            df_tca = pd.read_csv(tca_file)
+            
+            # Check for required columns
+            required_cols = ['platform', 'test_event_id', 'test_case_id', 
+                           'timestamp_start', 'test_case_analysis_timestamp_end']
+            
+            if not all(col in df_tca.columns for col in required_cols):
+                print(f"  Warning: {tca_file.name} missing required columns")
+                continue
+            
+            # Process each test case
+            for _, row in df_tca.iterrows():
+                original_test_case_id = str(row.get('test_case_id'))
+                
+                # Split combined test cases by &
+                if '&' in original_test_case_id:
+                    test_case_parts = original_test_case_id.split('&')
+                else:
+                    test_case_parts = [original_test_case_id]
+                
+                # Create a separate entry for each part
+                for test_case_part in test_case_parts:
+                    test_case_part = test_case_part.strip()
+                    grouped_test_case_id = self.group_test_case_id(test_case_part)
+                    
+                    test_case_data.append({
+                        'unit_id': unit_id,
+                        'station': station,
+                        'save': save,
+                        'platform': row.get('platform', ''),
+                        'ofp': row.get('ofp', ''),
+                        'test_event_id': row.get('test_event_id'),
+                        'test_case_id': grouped_test_case_id,
+                        'test_case_id_original': test_case_part,
+                        'test_case_id_combined_original': original_test_case_id,  # Keep the full combined ID
+                        'timestamp_start': row.get('timestamp_start'),
+                        'timestamp_end': row.get('test_case_analysis_timestamp_end'),
+                        'duration': row.get('test_case_analysis_timestamp_end', 0) - row.get('timestamp_start', 0) 
+                                   if pd.notna(row.get('test_case_analysis_timestamp_end')) and pd.notna(row.get('timestamp_start')) else 0
+                    })
+            
+            print(f"  Loaded {tca_file.name}: {len(df_tca)} test cases")
+            
+        except Exception as e:
+            print(f"  Error loading {tca_file.name}: {e}")
+    
+    self.test_cases = test_case_data
+    if test_case_data:
+        self.df_test_cases = pd.DataFrame(test_case_data)
+        
+        # Print split/grouping summary
+        if 'test_case_id_combined_original' in self.df_test_cases.columns:
+            combined_count = self.df_test_cases['test_case_id_combined_original'].str.contains('&').sum()
+            original_count = self.df_test_cases['test_case_id_original'].nunique()
+            grouped_count = self.df_test_cases['test_case_id'].nunique()
+            print(f"  Split {combined_count} combined test cases")
+            print(f"  Grouped {original_count} original test case variants into {grouped_count} groups")
+    
+    print(f"  Total test case entries: {len(test_case_data)}")
+    return test_case_data
+
+def load_test_case_requirements(self):
+    """
+    Load test case-specific requirements from TestCases folder structure.
+    Splits combined test cases (separated by &) into separate entries.
+    """
+    if not self.test_cases_folder.exists():
+        print(f"Note: TestCases folder '{self.test_cases_folder}' does not exist")
+        return []
+    
+    test_case_folders = [d for d in self.test_cases_folder.iterdir() if d.is_dir()]
+    
+    if not test_case_folders:
+        print(f"No test case folders found in {self.test_cases_folder}")
+        return []
+    
+    print(f"\nLoading test case requirements from {len(test_case_folders)} test case folders...")
+    
+    requirements_results = []
+    
+    for test_case_folder in test_case_folders:
+        original_test_case_id = test_case_folder.name  # e.g., "QS-007_02&TW104_01"
+        
+        # Split combined test cases by &
+        if '&' in original_test_case_id:
+            test_case_parts = original_test_case_id.split('&')
+        else:
+            test_case_parts = [original_test_case_id]
+        
+        # Find all CSV files in this test case folder
+        csv_files = list(test_case_folder.glob("*.csv"))
+        
+        if not csv_files:
+            continue
+        
+        print(f"  Processing test case: {original_test_case_id}")
+        if len(test_case_parts) > 1:
+            print(f"    Split into: {', '.join(test_case_parts)}")
+        
+        for csv_file in csv_files:
+            try:
+                # Requirement name is the CSV filename without extension
+                requirement_name = csv_file.stem  # e.g., "ps3_0070"
+                
+                # Read the CSV
+                df = pd.read_csv(csv_file)
+                
+                # Check for required columns
+                required_cols = ['unit_id', 'station', 'save', 'timestamp']
+                if not all(col in df.columns for col in required_cols):
+                    print(f"    Warning: {csv_file.name} missing required columns")
+                    continue
+                
+                # Check if the requirement column exists
+                if requirement_name not in df.columns:
+                    print(f"    Warning: {csv_file.name} missing column '{requirement_name}'")
+                    continue
+                
+                # FILTER: Only keep rows with TRUE or FALSE
+                df[requirement_name] = df[requirement_name].astype(str).str.strip().str.upper()
+                df_filtered = df[df[requirement_name].isin(['TRUE', 'FALSE'])].copy()
+                
+                if df_filtered.empty:
+                    print(f"    Skipped {csv_file.name}: No TRUE/FALSE results (passed by default)")
+                    continue
+                
+                rows_before = len(df)
+                rows_after = len(df_filtered)
+                print(f"    Loaded {csv_file.name}: {rows_after}/{rows_before} rows with TRUE/FALSE")
+                
+                # Process each filtered row for EACH test case part
+                for test_case_part in test_case_parts:
+                    test_case_part = test_case_part.strip()
+                    grouped_test_case_id = self.group_test_case_id(test_case_part)
+                    
+                    for _, row in df_filtered.iterrows():
+                        unit_id = str(row.get('unit_id', '')).strip()
+                        station = str(row.get('station', '')).strip()
+                        save = str(row.get('save', '')).strip()
+                        timestamp = row.get('timestamp')
+                        ofp = str(row.get('ofp', '')).strip() if 'ofp' in df.columns else ''
+                        
+                        result_value = row[requirement_name]
+                        
+                        if not unit_id or not station or not save or pd.isna(timestamp):
+                            continue
+                        
+                        requirements_results.append({
+                            'test_case_id': grouped_test_case_id,
+                            'test_case_id_original': test_case_part,
+                            'test_case_id_combined_original': original_test_case_id,
+                            'requirement_name': requirement_name,
+                            'unit_id': unit_id,
+                            'station': station,
+                            'save': save,
+                            'ofp': ofp,
+                            'timestamp': timestamp,
+                            'result': result_value,
+                            'passed': result_value == 'TRUE',
+                            'failed': result_value == 'FALSE'
+                        })
+                
+            except Exception as e:
+                print(f"    Error loading {csv_file.name}: {e}")
+    
+    print(f"  Total test case requirement results loaded: {len(requirements_results)}")
+    
+    self.test_case_requirements = requirements_results
+    if requirements_results:
+        self.df_test_case_requirements = pd.DataFrame(requirements_results)
+        
+        # Print summary statistics
+        if len(requirements_results) > 0:
+            total_passed = sum(1 for r in requirements_results if r['passed'])
+            total_failed = sum(1 for r in requirements_results if r['failed'])
+            print(f"    Summary: {total_passed} passed, {total_failed} failed")
+    
+    return requirements_results
+
+def group_test_case_id(self, test_case_id: str):
+    """
+    Group test case IDs by removing variant suffixes.
+    NOTE: This should NOT receive combined test cases with &.
+    Those should be split before calling this function.
+    
+    Examples: 
+        QS-007_02 -> QS-007
+        QS-007_04 -> QS-007
+        TW104_01 -> TW104
+        QS_2000_02 -> QS_2000
+    """
+    import re
+    
+    # Remove trailing underscore + 1-2 digits
+    match = re.match(r'^(.+?)(?:_\d{1,2})?$', test_case_id.strip())
+    if match:
+        return match.group(1)
+    
+    return test_case_id.strip()
