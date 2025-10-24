@@ -1,0 +1,112 @@
+You're right, my last diagnosis was wrong. If the first chart is loading, it means the `drawRiskCharts` function *is* running, and the `filteredRiskData` variable *does* have data.
+
+The problem is that the "blank" charts and table *after* the first one are being caused by a **different error**.
+
+The logic I gave you for the **Detailed Test Case Risk Analysis** table (the last item on the tab) has a bug. It's trying to read `risk.requirement_list` *before* checking if it exists, and that's causing a JavaScript crash (`TypeError: Cannot read properties of null (reading 'split')`).
+
+This error stops the script *after* the first chart has drawn, which is why you see the first chart, and then nothing but blankness after it.
+
+Here are the fixes for the `drawRiskCharts` JavaScript function to correct this crash and fix the blank charts.
+
+-----
+
+### **The Fixes (in `create_interactive_dashboard`)**
+
+You only need to modify the `drawRiskCharts` function in the `<script>` block.
+
+#### 1\. Fix the Crashing Table
+
+This is the main error. We need to check if `risk.requirement_list` exists *before* we try to `.split()` it.
+
+**In the `drawRiskCharts` function, at the very end (in the table loop):**
+
+```javascript
+                // Detail table - use pre-computed data directly
+                const tableBody = document.getElementById('riskDetailTableBody');
+                tableBody.innerHTML = '';
+                
+                if (filteredRiskData.length > 0) {{
+                    filteredRiskData.forEach(risk => {{
+                        const row = tableBody.insertRow();
+                        
+                        row.insertCell(0).textContent = risk.test_case;
+                        row.insertCell(1).textContent = risk.total_bus_flips;
+                        row.insertCell(2).textContent = risk.avg_flips_per_run.toFixed(1);
+                        row.insertCell(3).textContent = `${{risk.top_station_save_combo}} (${{risk.top_combo_flips}})`;
+                        row.insertCell(4).textContent = risk.station_save_combos || 'N/A';
+                        row.insertCell(5).textContent = risk.top_msg_types || 'N/A';
+                        
+                        // -----------------------------------------------------------------
+                        // FIX: This was the crash. We must check if 'risk.requirement_list'
+                        // is null before trying to split it.
+                        // -----------------------------------------------------------------
+                        let reqHtml = 'None';
+                        if (risk.requirement_list) {{
+                            const reqList = risk.requirement_list.split(', ');
+                            reqHtml = reqList.length > 3 
+                                ? `${{reqList.slice(0,3).join(', ')}}... (+${{reqList.length - 3}} more)` 
+                                : reqList.join(', ');
+                        }}
+                        row.insertCell(6).textContent = `${{risk.requirements_at_risk}}: ${{reqHtml}}`;
+                        // -----------------------------------------------------------------
+    
+                        const timeCell = row.insertCell(7);
+                        timeCell.textContent = risk.time_ranges || 'N/A';
+                        timeCell.className = 'time-range-cell';
+                    }});
+```
+
+#### 2\. Fix the Blank Station/Save Chart
+
+The logic to populate this chart was correct, but it was being derived from `topRisk` (the top 20) instead of *all* the filtered data. This was causing it to be blank if the top 20 test cases didn't have `station_save_combos`. We'll change it to use the full `filteredRiskData` list.
+
+**In the `drawRiskCharts` function, in the "Station/Save impact" section:**
+
+```javascript
+                // Station/Save impact - Use pre-computed data
+                const stationSaveImpact = {{}};
+                
+                // -----------------------------------------------------------------
+                // FIX: Use 'filteredRiskData' instead of 'topRisk'
+                // This ensures we build the chart from all data, not just top 20
+                // -----------------------------------------------------------------
+                filteredRiskData.forEach(tc => {{
+                    if (tc.station_save_combos) {{
+                        // Parse format: "RSFC/L1/4(10), RSFC/L2/3(5)"
+                        const combos = tc.station_save_combos.split(', ');
+                        stationSaveImpact[tc.test_case] = {{}};
+                        
+                        combos.forEach(combo => {{
+                            const match = combo.match(/(.+?)\((\d+)\)/);
+                            if (match) {{
+                                const location = match[1];
+                                const flips = parseInt(match[2]);
+                                stationSaveImpact[tc.test_case][location] = flips;
+                            }}
+                        }});
+                    }}
+                }});
+                
+                // Create stacked bar chart
+                if (Object.keys(stationSaveImpact).length > 0) {{
+                // ... (the rest of the chart logic is fine) ...
+```
+
+#### 3\. Fix the Blank Requirements Chart
+
+Same problem as above. It was being built from `topRisk` instead of all filtered data.
+
+**In the `drawRiskCharts` function, in the "Requirements at risk" section:**
+
+```javascript
+                // Requirements at risk
+                // -----------------------------------------------------------------
+                // FIX: Use 'filteredRiskData' instead of 'topRisk'
+                // -----------------------------------------------------------------
+                const reqRiskData = filteredRiskData.filter(d => d.requirements_at_risk > 0);
+                
+                if (reqRiskData.length > 0) {{
+                // ... (the rest of the chart logic is fine) ...
+```
+
+Fixing the crash in the table (Fix 1) will allow the other charts to render. Fixing the data sources for the charts (Fixes 2 & 3) will ensure they are populated with all the data that matches your filters, not just the data from the Top 20 test cases.
