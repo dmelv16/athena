@@ -1,0 +1,179 @@
+Got it. You want to ditch the other charts on the "Risk" tab and just show the data in tables. The first chart stays, but the "Station/Save Impact" and "Requirements at Risk" charts will be replaced with tables.
+
+Here are the changes for the `create_interactive_dashboard` method to make this happen.
+
+-----
+
+### 1\. Modify the HTML (in `create_interactive_dashboard`)
+
+First, we need to change the HTML to remove the `div`s for the old charts and replace one of them with a new table structure.
+
+**Find the \`\` section and replace it with this:**
+
+```html
+                <div id="risk-tab" class="tab-content">
+                    <div class="chart-container">
+                        <div class="chart-title">⚠️ Test Cases at Highest Risk of Bus Flip Errors</div>
+                        <div class="info-box" style="background: linear-gradient(135deg, #fee 0%, #fcc 100%); border-left-color: #e74c3c;">
+                            <strong>CRITICAL RISK ANALYSIS:</strong> These test cases have significant bus flip activity that could affect test results.
+                            Focus on the top items - they represent the highest risk to requirement validation.
+                        </div>
+                        <div id="riskOverviewChart"></div> </div>
+                    
+                    <div class="chart-container">
+                        <div class="chart-title">Requirements at Risk by Test Case</div>
+                        <div class="info-box">
+                            <strong>At Risk:</strong> This table lists all test cases from the current filter that have associated requirements at risk (based on the mapping file).
+                        </div>
+                        <div style="overflow-x: auto;">
+                            <table id="requirementsAtRiskTable" class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th onclick="sortTable('requirementsAtRiskTable', 0)">Test Case</th>
+                                        <th onclick="sortTable('requirementsAtRiskTable', 1)">Total Flips</th>
+                                        <th onclick="sortTable('requirementsAtRiskTable', 2)">Requirements at Risk</th>
+                                        <th onclick="sortTable('requirementsAtRiskTable', 3)">Full Requirement List</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="requirementsAtRiskTableBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    
+                    <div class="chart-container">
+                        <div class="chart-title">Detailed Test Case Risk Analysis</div>
+                         <div class="info-box">
+                            <strong>Full Details:</strong> This table provides a complete breakdown of every test case in the current filter, including location data (station/save), message types, and requirement counts.
+                        </div>
+                        <div style="overflow-x: auto;">
+                            <table id="riskDetailTable" class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th onclick="sortTable('riskDetailTable', 0)">Test Case</th>
+                                        <th onclick="sortTable('riskDetailTable', 1)">Total Flips</th>
+                                        <th onclick="sortTable('riskDetailTable', 2)">Avg Flips/Run</th>
+                                        <th onclick="sortTable('riskDetailTable', 3)">Top Station/Save</th>
+                                        <th onclick="sortTable('riskDetailTable', 4)">All Station/Save Combos</th>
+                                        <th onclick="sortTable('riskDetailTable', 5)">Top Message Types</th>
+                                        <th onclick="sortTable('riskDetailTable', 6)">Requirements at Risk</th>
+                                        <th onclick="sortTable('riskDetailTable', 7)">Time Ranges</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="riskDetailTableBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+```
+
+-----
+
+### 2\. Modify the JavaScript (in `create_interactive_dashboard`)
+
+Now, we'll **replace the entire `drawRiskCharts` function** in your `<script>` tag with this new version. This version removes the code for the deleted charts and adds the logic to populate the new `requirementsAtRiskTable`.
+
+```javascript
+            function drawRiskCharts() {
+                if (testCaseRiskData.length === 0) {
+                    document.getElementById('riskOverviewChart').innerHTML = '<p>No risk data available</p>';
+                    return;
+                }
+                
+                // This uses the globally filtered risk data
+                const topRisk = filteredRiskData.slice(0, 20);
+                
+                // 1. Draw the first chart (this is unchanged)
+                Plotly.newPlot('riskOverviewChart', [{
+                    x: topRisk.map(d => d.test_case),
+                    y: topRisk.map(d => d.total_bus_flips),
+                    type: 'bar',
+                    marker: { 
+                        color: topRisk.map(d => 
+                            d.total_bus_flips > 100 ? '#e74c3c' :
+                            d.total_bus_flips > 50 ? '#f39c12' : '#f0ad4e'
+                        )
+                    },
+                    text: topRisk.map(d => `${d.instances_run} runs, ${d.requirements_at_risk} reqs at risk`),
+                    hoverinfo: 'none' // Your request
+                }], {
+                    margin: { t: 10, b: 120, l: 60, r: 20 },
+                    xaxis: { title: 'Test Case', tickangle: -45 },
+                    yaxis: { title: 'Total Bus Flips (Deduplicated)' }
+                });
+                
+                // -----------------------------------------------------------------
+                // REMOVED: All logic for 'riskStationSaveChart' (treemap/stacked bar)
+                // -----------------------------------------------------------------
+
+                
+                // -----------------------------------------------------------------
+                // 2. Populate the new "Requirements at Risk" table
+                // -----------------------------------------------------------------
+                const reqRiskData = filteredRiskData.filter(d => d.requirements_at_risk > 0);
+                const reqTableBody = document.getElementById('requirementsAtRiskTableBody');
+                reqTableBody.innerHTML = '';
+                
+                if (reqRiskData.length > 0) {
+                    // Sort by most at risk first
+                    reqRiskData.sort((a, b) => b.requirements_at_risk - a.requirements_at_risk); 
+                    
+                    reqRiskData.forEach(risk => {
+                        const row = reqTableBody.insertRow();
+                        row.insertCell(0).textContent = risk.test_case;
+                        row.insertCell(1).textContent = risk.total_bus_flips;
+                        row.insertCell(2).textContent = risk.requirements_at_risk;
+                        
+                        // Format list with line breaks
+                        let reqListHtml = 'None';
+                        if (risk.requirement_list) {
+                            reqListHtml = risk.requirement_list.split(', ').join('<br>');
+                        }
+                        const reqCell = row.insertCell(3);
+                        reqCell.innerHTML = reqListHtml;
+                        reqCell.style.whiteSpace = "nowrap"; // Respect the <br>
+                    });
+                } else {
+                    reqTableBody.innerHTML = '<tr><td colspan="4">No requirements at risk found for current filter.</td></tr>';
+                }
+                // -----------------------------------------------------------------
+                
+                // -----------------------------------------------------------------
+                // 3. Populate the "Detailed Test Case Risk Analysis" table
+                // (This includes the crash fix)
+                // -----------------------------------------------------------------
+                const tableBody = document.getElementById('riskDetailTableBody');
+                tableBody.innerHTML = '';
+                
+                if (filteredRiskData.length > 0) {
+                    // Sort this table by total flips
+                    filteredRiskData.sort((a, b) => b.total_bus_flips - a.total_bus_flips);
+                    
+                    filteredRiskData.forEach(risk => {
+                        const row = tableBody.insertRow();
+                        
+                        row.insertCell(0).textContent = risk.test_case;
+                        row.insertCell(1).textContent = risk.total_bus_flips;
+                        row.insertCell(2).textContent = risk.avg_flips_per_run.toFixed(1);
+                        row.insertCell(3).textContent = `${risk.top_station_save_combo} (${risk.top_combo_flips})`;
+                        row.insertCell(4).textContent = risk.station_save_combos || 'N/A';
+                        row.insertCell(5).textContent = risk.top_msg_types || 'N/A';
+                        
+                        // CRASH FIX: Check if requirement_list exists before splitting
+                        let reqHtml = 'None';
+                        if (risk.requirement_list) {
+                            const reqList = risk.requirement_list.split(', ');
+                            reqHtml = reqList.length > 3 
+                                ? `${reqList.slice(0,3).join(', ')}... (+${reqList.length - 3} more)` 
+                                : reqList.join(', ');
+                        }
+                        row.insertCell(6).textContent = `${risk.requirements_at_risk}: ${reqHtml}`;
+    
+                        const timeCell = row.insertCell(7);
+                        timeCell.textContent = risk.time_ranges || 'N/A';
+                        timeCell.className = 'time-range-cell';
+                    });
+                } else {
+                    tableBody.innerHTML = '<tr><td colspan="8">No detailed risk data to display for current filter.</td></tr>';
+                }
+            }
+```
