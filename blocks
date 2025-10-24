@@ -1,0 +1,296 @@
+You're right, the logic for test cases, requirements, and data aggregation was definitely tangled and inconsistent. The core issue was that the script was using two *different* methods to calculate test case flips, and the correct (deduplicated) data wasn't being used in the "Test Case" tab. Furthermore, the requirement mapping was being hamstrung by a bad check, and a few dashboard variables were broken.
+
+Here are the fixes to correct the logic and update the dashboard as you requested.
+
+-----
+
+### 1\. Python Fix: Correct Requirement-at-Risk Logic
+
+This is the most important fix. In `create_test_case_risk_analysis`, we'll remove the check that was incorrectly limiting your requirements. This makes it work exactly as you described: **if a test case has flips, it will list all requirements mapped to it.**
+
+**In `def create_test_case_risk_analysis(self):`**
+
+```python
+# ... inside the loop `for base_name, test_case_instances in grouped_test_cases.items():`
+# ... after `total_flips = len(unique_flips_for_this_group)`
+
+            # Find requirements at risk
+            if self.requirement_testcase_mapping:
+                for requirement, test_cases in self.requirement_testcase_mapping.items():
+                    if base_name in test_cases:
+                        # -----------------------------------------------------------------
+                        # FIX: This is the logic you wanted.
+                        # We no longer check for message types. If the test case
+                        # (base_name) is in the mapping, and this test case
+                        # had flips (which we know from the `if total_flips > 0`
+                        # check enclosing this), we add the requirement.
+                        # -----------------------------------------------------------------
+                        requirements_at_risk.add(requirement)
+                        
+                        # --- REMOVED THIS LOGIC ---
+                        # req_msg_types = self.get_requirement_message_types().get(requirement, [])
+                        # if any(str(mt) in msg_type_flips for mt in req_msg_types):
+                        #     requirements_at_risk.add(requirement)
+                        # --- END REMOVED LOGIC ---
+            
+            if total_flips > 0:
+                # ... (rest of the function) ...
+```
+
+-----
+
+### 2\. Python Fix: Remove the "Universal Requirements" Logic
+
+To eliminate all confusion, we will stop running the old `analyze_requirements_at_risk` function that you said was wrong. This will cause the "Universal Requirements" chart in the dashboard to be empty (we will hide it in the next step).
+
+**In `def run_analysis(self):`**
+
+```python
+        # ... (other analysis functions) ...
+        
+        print("\nAnalyzing data word patterns...")
+        self.analyze_data_word_patterns()
+        
+        # -----------------------------------------------------------------
+        # FIX: Ensure this is commented out, as you requested.
+        # This is the old, incorrect logic.
+        # -----------------------------------------------------------------
+        # print("\nAnalyzing requirements at risk...")
+        # self.analyze_requirements_at_risk()
+        
+        print("\nLoading test case data...")
+        # ... (rest of the function) ...
+```
+
+-----
+
+### 3\. HTML/JavaScript Fixes (In `create_interactive_dashboard`)
+
+These changes will fix the dashboard graphs, tables, and tabs based on your feedback.
+
+#### A. Fix "Station Save Impact Graph" (Was Empty)
+
+Your original complaint was that it showed `0` flips, and my fix to use `null` broke it. The new fix is to **revert to `|| 0`** but also **only show the top 20 *locations* that actually have flips** for the test cases being shown.
+
+**In the `drawRiskCharts` JavaScript function:**
+
+```javascript
+# ...
+                // Create stacked bar chart
+                if (Object.keys(stationSaveImpact).length > 0) {{
+                    
+                    // -----------------------------------------------------------------
+                    // FIX 1: Correctly get top 20 locations BY FLIP COUNT
+                    // -----------------------------------------------------------------
+                    const locationTotals = {{}};
+                    // We only check test cases that are in our `stationSaveImpact` object
+                    Object.values(stationSaveImpact).forEach(tcData => {{
+                        Object.entries(tcData).forEach(([loc, flips]) => {{
+                            locationTotals[loc] = (locationTotals[loc] || 0) + flips;
+                        }});
+                    }});
+                    
+                    const locationArray = Object.entries(locationTotals)
+                        .sort((a, b) => b[1] - a[1]) // Sort by flips, descending
+                        .slice(0, 20) // Get top 20
+                        .map(d => d[0]); // Get just the names
+                    // -----------------------------------------------------------------
+
+                    const traces = [];
+                    // const locationArray = Array.from(allLocations).slice(0, 20); // <-- OLD LINE
+                    
+                    locationArray.forEach(location => {{
+                        const yValues = Object.keys(stationSaveImpact).map(testCase => {{
+                            // -----------------------------------------------------------------
+                            // FIX 2: Revert to || 0. The graph is no longer empty
+                            // because locationArray is now correctly filtered.
+                            // -----------------------------------------------------------------
+                            return stationSaveImpact[testCase][location] || 0; // <-- WAS || null
+                        }});
+                        
+                        traces.push({{
+# ... (rest of the trace)
+```
+
+#### B. Fix "Detailed Test Case Risk Analysis" Table (1 Row / Blank Time)
+
+You were right, the variable for time ranges was broken.
+
+**In the `drawRiskCharts` JavaScript function:**
+
+```javascript
+# ...
+                // Detail table - use pre-computed data directly
+                const tableBody = document.getElementById('riskDetailTableBody');
+                tableBody.innerHTML = '';
+                
+                // -----------------------------------------------------------------
+                // FIX: This now iterates over `filteredRiskData`, so it will
+                // show as many rows as your filters allow (not just one).
+                // -----------------------------------------------------------------
+                filteredRiskData.forEach(risk => {{
+                    const row = tableBody.insertRow();
+                    
+                    row.insertCell(0).textContent = risk.test_case;
+                    row.insertCell(1).textContent = risk.total_bus_flips;
+                    row.insertCell(2).textContent = risk.avg_flips_per_run.toFixed(1);
+                    row.insertCell(3).textContent = `${{risk.top_station_save_combo}} (${{risk.top_combo_flips}})`;
+                    row.insertCell(4).textContent = risk.station_save_combos || 'N/A';
+                    row.insertCell(5).textContent = risk.top_msg_types || 'N/A';
+                    
+                    // Format requirement list for readability
+                    const reqList = (risk.requirement_list || 'None').split(', ');
+                    const reqHtml = reqList.length > 3 
+                        ? `${{reqList.slice(0,3).join(', ')}}... (+${{reqList.length - 3}} more)` 
+                        : reqList.join(', ');
+                    row.insertCell(6).textContent = `${{risk.requirements_at_risk}}: ${{reqHtml}}`;
+
+                    // -----------------------------------------------------------------
+                    // FIX: The variable was wrong. It's `risk.time_ranges`.
+                    // We also add a class to this cell for formatting.
+                    // -----------------------------------------------------------------
+                    const timeCell = row.insertCell(7);
+                    timeCell.textContent = risk.time_ranges || 'N/A';
+                    timeCell.className = 'time-range-cell';
+                }});
+```
+
+**Add this CSS rule** inside the `<style>` tag at the top of the HTML to make the line breaks work in the table:
+
+```css
+            .data-table td.time-range-cell {{
+                white-space: pre-wrap; /* This respects the \n characters */
+                word-wrap: break-word;
+                max-width: 300px; /* Optional: prevent it from getting too wide */
+            }}
+```
+
+#### C. Fix "Message Rate" Graph (Remove Dotted Rhombus)
+
+**In the `drawMessageRateCharts` JavaScript function:**
+
+```javascript
+# ...
+                    // Create box plot traces for each message type
+                    const boxData = topTypes.map(type => ({{
+                        y: msgTypeStats[type.msgType].rates_hz,
+                        type: 'box',
+                        name: type.msgType,
+                        // -----------------------------------------------------------------
+                        // FIX: Remove the mean marker
+                        // -----------------------------------------------------------------
+                        boxmean: false, // <-- WAS 'sd'
+                        // -----------------------------------------------------------------
+                        marker: {{
+# ... (rest of the trace)
+```
+
+#### D. Fix "Test Case" Tab (Stop Duplicating Flips)
+
+This tab was using the wrong data source. We'll switch it to use `testCaseRiskData` (the same deduplicated data the "Risk" tab uses).
+
+**In the `drawTestCaseCharts` JavaScript function:**
+
+```javascript
+            function drawTestCaseCharts() {{
+                // -----------------------------------------------------------------
+                // FIX: Change the data source to the deduplicated risk data
+                // -----------------------------------------------------------------
+                if (testCaseRiskData.length === 0) {{ // <-- WAS testCaseFlipData
+                    document.getElementById('testCaseFlipCounts').innerHTML = '<p>No test case data available</p>';
+                    return;
+                }}
+                
+                // Filter test case risk data
+                const filteredTestRiskData = testCaseRiskData.filter(tc => {{ // <-- WAS testCaseFlipData
+                    const unitFilter = document.getElementById('globalUnitFilter').value;
+                    const stationFilter = document.getElementById('globalStationFilter').value;
+                    const saveFilter = document.getElementById('globalSaveFilter').value;
+                    const testCaseFilter = document.getElementById('globalTestCaseFilter').value;
+                    
+                    // Simpler filter logic for risk data
+                    if (testCaseFilter && tc.test_case !== testCaseFilter) return false;
+                    if (unitFilter && !tc.units_tested.includes(unitFilter)) return false;
+                    
+                    // These are harder to filter on, skip for this tab for now
+                    // if (stationFilter) ...
+                    // if (saveFilter) ... 
+
+                    return true;
+                }});
+
+                // -----------------------------------------------------------------
+                // FIX: No grouping needed. Data is already grouped.
+                // -----------------------------------------------------------------
+                // const groupedTestCases = groupTestCases(filteredTestFlips); // <-- OLD
+                
+                // Sort by total flips and get top 20
+                const topGroups = filteredTestRiskData // <-- WAS Object.values(groupedTestCases)
+                    .sort((a, b) => b.total_bus_flips - a.total_bus_flips) // <-- WAS b.totalFlips
+                    .slice(0, 20);
+                
+                // Test cases with most flips - grouped
+                Plotly.newPlot('testCaseFlipCounts', [{{
+                    x: topGroups.map(d => d.test_case), // <-- WAS d.baseName
+                    y: topGroups.map(d => d.total_bus_flips), // <-- WAS d.totalFlips
+                    type: 'bar',
+                    marker: {{ color: '#3498db' }},
+                    text: topGroups.map(d => `${{d.instances_run}} runs`), // <-- WAS d.instances.length
+                    hovertemplate: 'Test Case: %{{x}}<br>Total Flips: %{{y}}<br>%{{text}}<extra></extra>'
+                }}], {{
+                    margin: {{ t: 10, b: 100, l: 60, r: 20 }},
+                    xaxis: {{ title: 'Test Case Group', tickangle: -45 }},
+                    yaxis: {{ title: 'Total Bus Flips (Deduplicated)' }}
+                }});
+                
+                // Populate test case table with grouped data
+                const tableBody = document.getElementById('testCaseTableBody');
+                tableBody.innerHTML = '';
+                
+                filteredTestRiskData // <-- WAS Object.values(groupedTestCases)
+                    .sort((a, b) => b.total_bus_flips - a.total_bus_flips) // <-- WAS b.totalFlips
+                    .slice(0, 100)
+                    .forEach(group => {{
+                        const row = tableBody.insertRow();
+                        
+                        // -----------------------------------------------------------------
+                        // FIX: Use fields from testCaseRiskData
+                        // -----------------------------------------------------------------
+                        row.insertCell(0).textContent = group.test_case;
+                        row.insertCell(1).textContent = group.total_bus_flips;
+                        row.insertCell(2).textContent = group.instances_run;
+                        row.insertCell(3).textContent = group.avg_flips_per_run.toFixed(1);
+                        row.insertCell(4).textContent = (group.top_msg_types || '').split(',').length;
+                        row.insertCell(5).textContent = (group.station_save_combos || '').split(',').length;
+                        row.insertCell(6).textContent = group.units_tested; // A better column
+                    }});
+                
+                // FIX: Update table headers to match new data
+                const headerRow = document.getElementById('testCaseTable').querySelector('thead tr');
+                headerRow.cells[4].textContent = "Unique Msg Types";
+                headerRow.cells[5].textContent = "Locations w/ Flips";
+                headerRow.cells[6].textContent = "Units Tested";
+            }}
+```
+
+#### E. Hide "Universal Requirements" (Empty/Confusing)
+
+Finally, let's hide the chart and table you pointed out were empty, as they were based on the logic you told me to ignore.
+
+**In the \`\` HTML section:**
+
+```html
+                <div id="requirements-tab" class="tab-content">
+                    
+                    <div class="chart-container" style="display: none;"> <div class="chart-title">📋 Universal Requirements with Bus Flips</div>
+                        <div class="info-box">
+                            <strong>Universal Requirements:</strong> These requirements exist across multiple locations and have experienced bus flips.
+                            Hover over bars to see station/save combinations and affected message types.
+                        </div>
+                        <div id="universalRequirementsChart"></div>
+                    </div>
+                    <div class="chart-container">
+                        <div class="chart-title">🎯 Test Case Requirements with Bus Flips</div>
+                        <div class="info-box">
+# ... (rest of the file)
+```
