@@ -1,0 +1,177 @@
+Hello\! Based on your feedback, I've identified the key issues with the script's logic, especially concerning how test cases are grouped and how requirements at risk are identified.
+
+You are correct: the logic was "all over the place." The most significant problem was that the **requirement-to-test-case mapping file was being loaded *after* the risk analysis was performed**, which is why the "requirements at risk" section was empty and the detailed risk table was incomplete.
+
+Furthermore, the script was running an old, incorrect analysis (`analyze_requirements_at_risk`) that you specifically said to ignore. The correct logic (grouping test cases, deduplicating flips, and then finding matching requirements) was in a different function (`create_test_case_risk_analysis`) but wasn't being fed the right data at the right time.
+
+Here are the specific fixes to correct the script's logic and update the dashboard as you requested.
+
+-----
+
+### 1\. Fix: Correcting the Analysis Execution Order
+
+This is the most critical fix. We need to ensure the `requirement_testcase_mapping` is loaded *before* the test case risk analysis is run. We also need to remove the call to the old, incorrect "requirements at risk" function.
+
+**In the `run_analysis` method:**
+
+You need to **move** the line that loads the mapping and **comment out** the call to `analyze_requirements_at_risk`.
+
+```python
+# In def run_analysis(self):
+
+        # ... (other analysis functions) ...
+
+        print("\nAnalyzing data word patterns...")
+        self.analyze_data_word_patterns()
+        
+        # -----------------------------------------------------------------
+        # FIX 1: COMMENT OUT THE OLD, INCORRECT ANALYSIS
+        # -----------------------------------------------------------------
+        # print("\nAnalyzing requirements at risk...")
+        # self.analyze_requirements_at_risk()
+        
+        print("\nLoading test case data...")
+        self.load_tca_files()
+        
+        # -----------------------------------------------------------------
+        # FIX 2: LOAD THE MAPPING *BEFORE* RUNNING THE RISK ANALYSIS
+        # -----------------------------------------------------------------
+        print("\nLoading requirement-testcase mapping...")
+        self.requirement_testcase_mapping = self.load_requirement_testcase_mapping()
+        
+        if self.df_test_cases is not None and not self.df_test_cases.empty:
+            print("\nAnalyzing test case coverage...")
+            self.analyze_test_case_coverage()
+            
+            print("\nAnalyzing test case bus flips...")
+            self.analyze_test_case_bus_flips()
+            
+            print("\nCalculating test case message rates...")
+            self.calculate_test_case_message_rates()
+            
+            print("\nCreating test case summary...")
+            self.create_test_case_summary()
+            
+            # NEW: Load and analyze test case requirements
+            print("\nLoading test case requirements...")
+            self.load_test_case_requirements()
+
+            # This function will now work correctly because the mapping is loaded
+            print("\nCreating test case risk analysis...")
+            self.create_test_case_risk_analysis()
+
+            if self.df_test_case_requirements is not None:
+                print("\nCreating requirement-test case mapping...")
+                self.create_requirement_test_case_mapping()
+                
+                print("\nAnalyzing test case requirements vs bus flips...")
+                self.analyze_test_case_requirements_vs_flips()
+
+        # -----------------------------------------------------------------
+        # REMOVE THIS - It was moved up
+        # -----------------------------------------------------------------
+        # Load requirement-testcase mapping
+        # print("\nLoading requirement-testcase mapping...")
+        # self.requirement_testcase_mapping = self.load_requirement_testcase_mapping()
+
+        # Calculate message rates
+        print("\nCalculating message rates...")
+```
+
+-----
+
+### 2\. Fix: Updating the HTML Dashboard
+
+Here are the changes for the JavaScript inside the `create_interactive_dashboard` method to fix the "Test Case Risk" tab.
+
+#### A. Remove Hover from First Graph
+
+In the `drawRiskCharts` JavaScript function, find the `Plotly.newPlot('riskOverviewChart', ...)` call and add the `hoverinfo: 'none'` property to the trace.
+
+```javascript
+# In def create_interactive_dashboard(self):
+# ... inside <script> tag ...
+# In function drawRiskCharts():
+
+                Plotly.newPlot('riskOverviewChart', [{{
+                    x: topRisk.map(d => d.test_case),
+                    y: topRisk.map(d => d.total_bus_flips),
+                    type: 'bar',
+                    marker: {{ 
+                        color: topRisk.map(d => 
+                            d.total_bus_flips > 100 ? '#e74c3c' :
+                            d.total_bus_flips > 50 ? '#f39c12' : '#f0ad4e'
+                        )
+                    }},
+                    text: topRisk.map(d => `${{d.instances_run}} runs, ${{d.requirements_at_risk}} reqs at risk`),
+                    // -----------------------------------------------------------------
+                    // FIX 3: REMOVE HOVER CAPABILITY
+                    // -----------------------------------------------------------------
+                    hoverinfo: 'none', 
+                    // -----------------------------------------------------------------
+                    customdata: topRisk.map(d => d.units_tested)
+                }}], {{
+```
+
+#### B. Fix Station/Save Graph (Stop Showing 0 Flips)
+
+This fix involves two parts in the `drawRiskCharts` function:
+
+1.  Correctly find the **Top 20 locations by flip count**, not just by name.
+2.  Tell Plotly to plot `null` instead of `0` for test cases that don't have flips in a given location. This will remove them from the hover and the stack.
+
+<!-- end list -->
+
+```javascript
+# In def create_interactive_dashboard(self):
+# ... inside <script> tag ...
+# In function drawRiskCharts():
+
+                // Station/Save impact - Use pre-computed data
+                const stationSaveImpact = {{}};
+                
+                topRisk.forEach(tc => {{
+                    // ... (existing parsing logic) ...
+                }});
+                
+                // Create stacked bar chart
+                if (Object.keys(stationSaveImpact).length > 0) {{
+                    
+                    // -----------------------------------------------------------------
+                    // FIX 4a: CORRECTLY GET TOP 20 LOCATIONS BY FLIP COUNT
+                    // -----------------------------------------------------------------
+                    const locationTotals = {{}};
+                    Object.values(stationSaveImpact).forEach(tcData => {{
+                        Object.entries(tcData).forEach(([loc, flips]) => {{
+                            locationTotals[loc] = (locationTotals[loc] || 0) + flips;
+                        }});
+                    }});
+                    
+                    const locationArray = Object.entries(locationTotals)
+                        .sort((a, b) => b[1] - a[1]) // Sort by flips, descending
+                        .slice(0, 20) // Get top 20
+                        .map(d => d[0]); // Get just the names
+                    // -----------------------------------------------------------------
+
+                    const traces = [];
+                    // const locationArray = Array.from(allLocations).slice(0, 20); // <-- OLD LINE
+                    
+                    locationArray.forEach(location => {{
+                        const yValues = Object.keys(stationSaveImpact).map(testCase => {{
+                            // -----------------------------------------------------------------
+                            // FIX 4b: RETURN NULL INSTEAD OF 0 TO HIDE FROM HOVER
+                            // -----------------------------------------------------------------
+                            return stationSaveImpact[testCase][location] || null; // <-- WAS || 0
+                        }});
+                        
+                        traces.push({{
+                            x: Object.keys(stationSaveImpact),
+                            y: yValues,
+                            name: location,
+                            type: 'bar',
+                            hovertemplate: `${{location}}<br>%{{x}}<br>Flips: %{{y}}<extra></extra>`
+                        }});
+                    }});
+```
+
+These changes will correctly load the requirement mapping *before* the risk analysis runs, populating your "requirements at risk" data and fixing the detailed table. They also remove the old analysis and apply your requested dashboard fixes.
